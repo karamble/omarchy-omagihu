@@ -145,6 +145,11 @@ const unitTemplate = `[Unit]
 Description=omagihu: developer and account centric GitHub radar
 Documentation=https://github.com/karamble/omarchy-omagihu
 After=graphical-session.target
+# omarchy plugin remove deletes the plugin folder and knows nothing about this
+# unit, so the unit has to know about the folder: without this it would fail on
+# every login for a binary that is gone. With it, a removed plugin simply stops
+# starting, and a purge is only needed to tidy the file itself away.
+ConditionPathExists=%s
 
 [Service]
 Type=simple
@@ -273,7 +278,7 @@ func writeUnit(addr, roots string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
-	unit := fmt.Sprintf(unitTemplate, daemon, addr, roots)
+	unit := fmt.Sprintf(unitTemplate, daemon, daemon, addr, roots)
 	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}

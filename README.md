@@ -43,6 +43,11 @@ on "connecting" for ever.
 
 Then open the panel. That is the whole setup.
 
+`omarchy plugin add` clones the folder and nothing else: it runs no build step
+and starts no service, because Omarchy's plugin commands deliberately execute
+nothing from a plugin. That is why the last two lines exist. If you skip them
+the panel says so and offers to run them for you.
+
 ## Updating
 
 ```bash
@@ -186,14 +191,25 @@ Three signals the usual repo widget does not have:
 ## Removal
 
 `omarchy plugin remove` deletes the plugin folder but knows nothing about a user
-service, so take that down first:
+service, so take that down first. Removing in this order leaves nothing behind:
 
 ```bash
 cd ~/.config/omarchy/plugins/karamble.omagihu
 bin/omagihu-setup uninstall            # stop and remove the service
 bin/omagihu-setup uninstall --purge    # ...and delete the stored tokens too
-omarchy plugin remove karamble.omagihu
+omarchy plugin remove karamble.omagihu --yes
 ```
+
+Remove the folder first and the service is left pointing at a binary that is no
+longer there. It will not run: the unit carries a `ConditionPathExists` on the
+daemon, so a removed plugin simply stops starting rather than failing at every
+login. The unit file itself stays until `uninstall` takes it away, so it is
+worth doing in the order above.
+
+The same applies to updating. `omarchy plugin update` re-clones over the folder
+and `bin/` is not tracked, so the helpers go with it; the daemon keeps running
+from the file it already had open until you rebuild. That is what the second
+line of **Updating** is for.
 
 ## Read only, on purpose
 

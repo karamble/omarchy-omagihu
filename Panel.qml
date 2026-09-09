@@ -174,8 +174,10 @@ Panel {
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
   readonly property string helperPath: pluginDir + "/bin/omagihu"
 
-  // Re-read the daemon's current view.
+  // Re-read the daemon's current view, checking first that there is still a
+  // helper to read it with.
   function refresh() {
+    if (!helperProbe.running) helperProbe.running = true
     if (!fetchProc.running) fetchProc.running = true
   }
 
@@ -313,6 +315,12 @@ Panel {
   }
 
   function runSetupCommand(sub) {
+    // Without the helpers this would hand the user a bare shell error, so send
+    // them to the one thing that fixes it instead.
+    if (root.helperMissing) {
+      root.runBuildAndInstall()
+      return
+    }
     root.runSetup("cd " + root.pluginDir + " && ./bin/omagihu-setup " + sub)
   }
 
@@ -335,6 +343,20 @@ Panel {
     running: true
     repeat: true
     onTriggered: root.refresh()
+  }
+
+  // Whether the helper exists is asked directly, because inferring it from the
+  // daemon is wrong in the case that actually bites: omarchy plugin add
+  // re-clones the folder and deletes bin/ while the daemon keeps running from
+  // the file it already opened. The panel then looks healthy and every button
+  // that shells out fails with a bare "No such file or directory".
+  Process {
+    id: helperProbe
+    command: ["test", "-x", root.helperPath]
+    onExited: function(code, status) {
+      root.helperMissing = code !== 0
+      if (root.helperMissing) root.snap = null
+    }
   }
 
   Process {
