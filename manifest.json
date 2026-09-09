@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "id": "karamble.omagihu",
+  "name": "Omagihu",
+  "version": "0.1.0",
+  "author": "karamble",
+  "license": "ISC",
+  "description": "Developer and account centric GitHub radar: what is waiting on you, what is in flight, and where local work is at risk",
+  "repository": "https://github.com/karamble/omarchy-omagihu",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Omagihu",
+    "description": "GitHub inbox, pull requests, CI and local repository risk",
+    "category": "Development",
+    "aliases": [
+      "github",
+      "git",
+      "prs",
+      "issues",
+      "ci",
+      "repos"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "addr": "127.0.0.1:8099",
+      "refreshSec": 60,
+      "countLocalRisk": true
+    },
+    "schema": [
+      {
+        "key": "addr",
+        "type": "string",
+        "label": "Daemon address",
+        "description": "Where omagihud is listening. Loopback by design.",
+        "defaultValue": "127.0.0.1:8099"
+      },
+      {
+        "key": "refreshSec",
+        "type": "integer",
+        "label": "Panel refresh (seconds)",
+        "description": "How often the panel re-reads the daemon. The daemon does its own polling; this only controls the view.",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 60
+      },
+      {
+        "key": "countLocalRisk",
+        "type": "boolean",
+        "label": "Local repository risk can light the bar",
+        "description": "Off means only reviews, broken pull requests and unread notifications colour the icon.",
+        "defaultValue": true
+      }
+    ]
+  }
+}
