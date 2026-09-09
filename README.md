@@ -36,17 +36,20 @@ bin/omagihu-setup install
 
 **The last two lines matter.** No binaries are shipped here, so the three small
 Go helpers are compiled on your own machine. It needs Go 1.24 or newer and
-builds nothing else. `install` then seeds your first account from the `gh` CLI,
-writes a systemd user unit and starts the daemon, so it comes back at every
-login. The panel tells you plainly if you skip either step, rather than sitting
-on "connecting" for ever.
+builds nothing else. `install` then seeds your first account from the `gh` CLI
+and asks which folders hold your checkouts. The panel tells you plainly if you
+skip either step, rather than sitting on "connecting" for ever.
+
+There is no service to install. Omarchy runs the daemon for as long as the
+plugin is enabled and stops it when it is not, so omagihu writes nothing outside
+this folder and `~/.config/omagihu`.
 
 Then open the panel. That is the whole setup.
 
-`omarchy plugin add` clones the folder and nothing else: it runs no build step
-and starts no service, because Omarchy's plugin commands deliberately execute
-nothing from a plugin. That is why the last two lines exist. If you skip them
-the panel says so and offers to run them for you.
+`omarchy plugin add` clones the folder and nothing else: it runs no build step,
+because Omarchy's plugin commands deliberately execute nothing from a plugin.
+That is why the last two lines exist. If you skip them the panel says so and
+offers to run them for you.
 
 ## Updating
 
@@ -190,26 +193,23 @@ Three signals the usual repo widget does not have:
 
 ## Removal
 
-`omarchy plugin remove` deletes the plugin folder but knows nothing about a user
-service, so take that down first. Removing in this order leaves nothing behind:
+Removing or disabling the plugin stops the daemon by itself, so the only thing
+left to decide is whether to keep your tokens:
 
 ```bash
 cd ~/.config/omarchy/plugins/karamble.omagihu
-bin/omagihu-setup uninstall            # stop and remove the service
-bin/omagihu-setup uninstall --purge    # ...and delete the stored tokens too
+bin/omagihu-setup uninstall --purge    # delete the stored tokens and watches
 omarchy plugin remove karamble.omagihu --yes
 ```
 
-Disabling or removing the plugin stops the daemon by itself. Omarchy runs no
-script of ours on removal, but it does unload the plugin first, and the plugin's
-service entry point takes that as its cue: no widget, no polling. It stops there
-and goes no further, because the same thing happens when you merely switch the
-widget off, and nothing that fires on a toggle should be deleting your tokens.
+Purge first, because it lives in the folder that is about to go. Skip it and the
+plugin still leaves cleanly; what stays is `~/.config/omagihu`, which is your
+account store, and deleting that without being asked would be the wrong default.
 
-So removing the folder without the lines above leaves the daemon stopped rather
-than orphaned. The unit also carries a `ConditionPathExists` on the daemon, so
-it will not come back at the next login either. What survives is the unit file
-and your account store, which is what `uninstall --purge` is for.
+Omarchy runs no script of ours on removal, but it does unload the plugin before
+it deletes anything, and the daemon is the plugin's own child: no widget, no
+daemon, and nothing polling GitHub. That is the same promise the off switch
+makes, and it holds whether you disable the widget or remove it outright.
 
 Updating is gentler: `omarchy plugin update` fetches and resets, so `bin/` is
 left where it is. The binaries are then older than the source beside them, which

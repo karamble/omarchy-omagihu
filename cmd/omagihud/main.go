@@ -41,7 +41,7 @@ func run(ctx context.Context) error {
 		logLevel   = flag.String("log-level", "info", "debug, info, warn or error")
 		inboxEvery = flag.Duration("inbox-interval", poll.DefaultInboxInterval, "notification poll cadence; GitHub's X-Poll-Interval wins when it asks for slower")
 		workEvery  = flag.Duration("work-interval", poll.DefaultWorkInterval, "pull request, review and issue poll cadence")
-		roots      = flag.String("roots", strings.Join(local.DefaultRoots, ","), "comma separated workspace roots to watch")
+		roots      = flag.String("roots", "", "comma separated workspace roots to watch; empty reads them from the store")
 		maxDepth   = flag.Int("max-depth", local.DefaultMaxDepth, "how many levels below each root to search")
 		excludes   = flag.String("excludes", strings.Join(local.DefaultExcludes, ","), "comma separated directory names never descended into")
 		refresh    = flag.Duration("refresh", local.DefaultRefresh, "working tree re-inspection cadence")
@@ -85,8 +85,16 @@ func run(ctx context.Context) error {
 	}
 	poller := poll.New(clients, logger, *inboxEvery, *workEvery)
 
+	// The roots live in the store. The flag stays as an override, for a one-off
+	// run against somewhere else, but the daemon is normally started with no
+	// arguments at all.
+	watchRoots := store.RootsOrDefault(local.DefaultRoots)
+	if *roots != "" {
+		watchRoots = local.SplitList(*roots)
+	}
+
 	watcher := local.NewWatcher(local.Config{
-		Roots:    local.SplitList(*roots),
+		Roots:    watchRoots,
 		MaxDepth: *maxDepth,
 		Excludes: local.SplitList(*excludes),
 	}, logger, *refresh, local.DefaultRediscover)

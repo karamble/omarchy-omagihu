@@ -79,6 +79,12 @@ type Store struct {
 	// no surface beyond what is already there.
 	MCPEnabled *bool `json:"mcpEnabled,omitempty"`
 
+	// Roots are the directories searched for checkouts. A plain slice, because
+	// empty says "never set" clearly enough here. They used to live in the
+	// systemd unit's ExecStart line, which meant configuration was kept in a
+	// command line and could only be read back by parsing a service file.
+	Roots []string `json:"roots,omitempty"`
+
 	path string
 }
 
@@ -179,6 +185,20 @@ func (s *Store) MCPActive() bool {
 // SetMCP records whether the MCP endpoint is served.
 func (s *Store) SetMCP(enabled bool) {
 	s.MCPEnabled = &enabled
+}
+
+// RootsOrDefault is where to look for checkouts, falling back to the defaults
+// when nothing has been chosen yet.
+func (s *Store) RootsOrDefault(fallback []string) []string {
+	if len(s.Roots) == 0 {
+		return fallback
+	}
+	return slices.Clone(s.Roots)
+}
+
+// SetRoots records the directories to watch.
+func (s *Store) SetRoots(roots []string) {
+	s.Roots = slices.Clone(roots)
 }
 
 // RecycleAPIToken mints a fresh bearer token, invalidating every client that

@@ -36,10 +36,10 @@ func usage() string {
 	return strings.TrimSpace(`
 usage: omagihu-setup <command> [flags]
 
-  install         seed an account if needed, then install and start the service
+  install         seed an account if needed and choose which folders to watch
   roots [DIRS]    change the directories that are watched, and restart
-  uninstall       stop and remove the service; --purge also deletes the config
-  status          show whether the service and daemon are running
+  uninstall       --purge deletes the stored config and tokens
+  status          show whether the daemon is answering, and what it watches
   init            create the store and seed the first account from the gh CLI
   add             add an account, reading its token from stdin
   list            show configured accounts with secrets redacted
@@ -56,7 +56,7 @@ flags:
   --config PATH   store location (default ~/.config/omagihu/accounts.json)
   --host HOST     forge host for add (default github.com)
   --login NAME    account login for add, otherwise resolved from the token
-  --addr HOSTPORT daemon address used by mcp and the service (default 127.0.0.1:8099)
+  --addr HOSTPORT daemon address (default 127.0.0.1:8099)
   --purge         with uninstall, also delete ~/.config/omagihu
   --roots DIRS    comma separated directories to watch; asked for if omitted
 
@@ -135,66 +135,6 @@ type options struct {
 	alerts alertFlags
 }
 
-// serviceName is the systemd user unit that keeps the daemon alive across
-// logins and reboots. Without it the plugin is dead after the first restart.
-const serviceName = "omagihu.service"
-
-// unitTemplate is filled with the absolute path of the daemon beside this
-// binary, so the unit follows wherever the plugin is installed.
-const unitTemplate = `[Unit]
-Description=omagihu: developer and account centric GitHub radar
-Documentation=https://github.com/karamble/omarchy-omagihu
-After=graphical-session.target
-# omarchy plugin remove deletes the plugin folder and knows nothing about this
-# unit, so the unit has to know about the folder: without this it would fail on
-# every login for a binary that is gone. With it, a removed plugin simply stops
-# starting, and a purge is only needed to tidy the file itself away.
-ConditionPathExists=%s
-
-[Service]
-Type=simple
-ExecStart=%s --addr %s --roots "%s"
-Restart=on-failure
-RestartSec=5
-Slice=app.slice
-
-[Install]
-WantedBy=default.target
-`
-
-func unitPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolving home: %w", err)
-	}
-	return filepath.Join(home, ".config", "systemd", "user", serviceName), nil
-}
-
-// daemonPath finds omagihud beside this binary, which is how the plugin ships.
-func daemonPath() (string, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolving own path: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(self); err == nil {
-		self = resolved
-	}
-	candidate := filepath.Join(filepath.Dir(self), "omagihud")
-	if _, err := os.Stat(candidate); err != nil {
-		return "", fmt.Errorf("omagihud not found beside %s: run make first", self)
-	}
-	return candidate, nil
-}
-
-func systemctl(args ...string) error {
-	cmd := exec.Command("systemctl", append([]string{"--user"}, args...)...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("systemctl --user %s: %w", strings.Join(args, " "), err)
-	}
-	return nil
-}
-
 // install is the whole first-run path: an account, a unit, a running daemon.
 func install(opts options) error {
 	store, err := load(opts.config)
@@ -214,26 +154,36 @@ func install(opts options) error {
 	if roots == "" {
 		roots = askRoots()
 	}
-
-	if err := writeUnit(opts.addr, roots); err != nil {
+	if err := saveRoots(opts.config, roots); err != nil {
 		return err
 	}
 
-	if err := systemctl("daemon-reload"); err != nil {
-		return err
-	}
-	if err := systemctl("enable", serviceName); err != nil {
-		return err
-	}
-	// Restart rather than start: install is also how an update is finished, and
-	// a service that is already up would otherwise keep running the old binary.
-	if err := systemctl("restart", serviceName); err != nil {
-		return err
-	}
 	fmt.Println()
-	fmt.Println("omagihu is running and will start again at login.")
-	fmt.Println("  omagihu-setup status      check on it")
-	fmt.Println("  omagihu-setup mcp         register the MCP endpoint with Claude")
+	fmt.Println("omagihu is set up. The shell runs the daemon while the plugin is")
+	fmt.Println("enabled, so there is no service to install and nothing of ours")
+	fmt.Println("outside this folder and ~/.config/omagihu.")
+	fmt.Println("  omarchy plugin enable karamble.omagihu     if it is not already")
+	fmt.Println("  omagihu-setup status                       check on it")
+	fmt.Println("  omagihu-setup mcp                          register the MCP endpoint")
+	return nil
+}
+
+// saveRoots records where checkouts are looked for, and tells a running daemon
+// so the change takes hold without anything being restarted.
+func saveRoots(config, roots string) error {
+	store, err := load(config)
+	if err != nil {
+		return err
+	}
+	list := local.SplitList(roots)
+	if len(list) == 0 {
+		return errors.New("at least one directory is needed, or there is nothing to watch")
+	}
+	store.SetRoots(list)
+	if err := store.Save(); err != nil {
+		return err
+	}
+	fmt.Printf("watching %s\n", strings.Join(list, ", "))
 	return nil
 }
 
@@ -265,28 +215,6 @@ func askRoots() string {
 	return defaultRoots()
 }
 
-// writeUnit renders the service file.
-func writeUnit(addr, roots string) error {
-	daemon, err := daemonPath()
-	if err != nil {
-		return err
-	}
-	path, err := unitPath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
-	}
-	unit := fmt.Sprintf(unitTemplate, daemon, daemon, addr, roots)
-	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	fmt.Printf("wrote %s\n", path)
-	fmt.Printf("watching %s\n", roots)
-	return nil
-}
-
 // setRoots changes the watched directories on an existing install.
 func setRoots(opts options, positional []string) error {
 	roots := opts.roots
@@ -297,35 +225,33 @@ func setRoots(opts options, positional []string) error {
 		roots = askRoots()
 	}
 
-	if err := writeUnit(opts.addr, roots); err != nil {
+	if err := saveRoots(opts.config, roots); err != nil {
 		return err
 	}
-	if err := systemctl("daemon-reload"); err != nil {
-		return err
+	// A running daemon is told directly, so the new roots take effect on the
+	// next pass. When nothing is running the stored value is picked up at start.
+	if _, err := apiSend(opts, http.MethodPost, "/api/roots",
+		map[string]any{"roots": local.SplitList(roots)}); err != nil {
+		fmt.Println("saved; the daemon is not running, so it will pick these up when it starts")
+		return nil
 	}
-	if err := systemctl("restart", serviceName); err != nil {
-		return err
-	}
-	fmt.Println("omagihu restarted with the new roots")
+	fmt.Println("the daemon is now watching the new roots")
 	return nil
 }
 
 // uninstall reverses install. omarchy plugin remove deletes the plugin folder
-// but knows nothing about a user service, so this has to be run first.
+// but knows nothing about the stored tokens, so this is how they are removed.
 func uninstall(opts options) error {
-	path, err := unitPath()
-	if err != nil {
-		return err
+	// There is no service to take down: the shell starts the daemon while the
+	// plugin is enabled and stops it when it is not, so removing or disabling
+	// the plugin is the whole of that. What is left is configuration.
+	if !opts.purge {
+		fmt.Println("nothing to stop: the daemon runs only while the plugin is enabled.")
+		fmt.Println("configuration kept; pass --purge to delete it too")
+		return nil
 	}
-	// Best effort: a unit that was never installed must not fail the teardown.
-	_ = systemctl("disable", "--now", serviceName)
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("removing %s: %w", path, err)
-	}
-	_ = systemctl("daemon-reload")
-	fmt.Printf("removed %s\n", path)
 
-	if opts.purge {
+	{
 		store, err := load(opts.config)
 		if err != nil {
 			return err
@@ -358,30 +284,29 @@ func uninstall(opts options) error {
 				}
 			}
 		}
-	} else {
-		fmt.Println("configuration kept; pass --purge to delete it too")
 	}
 	fmt.Println("now remove the plugin itself: omarchy plugin remove karamble.omagihu")
 	return nil
 }
 
 func status(opts options) error {
-	path, err := unitPath()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		fmt.Println("service: not installed (run omagihu-setup install)")
-	} else {
-		out, _ := exec.Command("systemctl", "--user", "is-active", serviceName).Output()
-		fmt.Printf("service: %s (%s)\n", strings.TrimSpace(string(out)), path)
-		if unit, err := os.ReadFile(path); err == nil {
-			for line := range strings.SplitSeq(string(unit), "\n") {
-				if strings.HasPrefix(line, "ExecStart=") {
-					fmt.Printf("watching: %s\n", rootsFromExec(line))
-				}
-			}
+	// There is no unit to inspect. The daemon runs while the plugin is enabled,
+	// so the honest question is whether it is answering.
+	if body, err := apiGet(opts, "/api/health"); err == nil {
+		var health struct {
+			Version    string `json:"version"`
+			Accounts   int    `json:"accounts"`
+			Repos      int    `json:"repos"`
+			Monitoring bool   `json:"monitoring"`
 		}
+		if json.Unmarshal(body, &health) == nil {
+			fmt.Printf("daemon:   answering on %s, version %s\n", opts.addr, health.Version)
+			fmt.Printf("watching: %d repositories, monitoring %v\n", health.Repos, health.Monitoring)
+		}
+	} else {
+		fmt.Printf("daemon:   not answering on %s\n", opts.addr)
+		fmt.Println("          the shell starts it while the plugin is enabled;")
+		fmt.Println("          check omarchy plugin list, and that bin/ is built")
 	}
 
 	store, err := accounts.Load(opts.config)
@@ -391,17 +316,9 @@ func status(opts options) error {
 	}
 	fmt.Printf("accounts: %d configured, monitoring %v\n",
 		len(store.Accounts), store.MonitoringEnabled())
+	fmt.Printf("roots:    %s\n", strings.Join(store.RootsOrDefault(local.DefaultRoots), ", "))
 	fmt.Printf("config:   %s\n", store.Path())
 	return nil
-}
-
-// rootsFromExec pulls the --roots value back out of an ExecStart line.
-func rootsFromExec(line string) string {
-	_, rest, found := strings.Cut(line, "--roots ")
-	if !found {
-		return "(defaults)"
-	}
-	return strings.Trim(strings.TrimSpace(rest), `"`)
 }
 
 func parseFlags(args []string) (options, []string, error) {

@@ -31,7 +31,10 @@ const (
 // Watcher keeps the local view current. fsnotify reacts to git operations
 // immediately; a timer catches working tree edits, which never touch .git.
 type Watcher struct {
-	cfg        Config
+	// cfg is swapped rather than mutated, so the roots can change while the
+	// watcher runs: every pass re-reads it, and a reconfigure takes effect on
+	// the next one with nothing to restart.
+	cfg        atomic.Pointer[Config]
 	logger     *slog.Logger
 	refresh    time.Duration
 	rediscover time.Duration
@@ -51,6 +54,19 @@ type Watcher struct {
 	// resumed carries a single nudge so waking re-inspects at once instead of
 	// waiting out the refresh timer with a stale or empty view.
 	resumed chan struct{}
+}
+
+// config is the settings as they stand right now.
+func (w *Watcher) config() Config { return *w.cfg.Load() }
+
+// SetRoots changes where checkouts are looked for. It takes effect on the next
+// discovery pass, which is what lets the roots be reconfigured from the panel
+// without restarting anything.
+func (w *Watcher) SetRoots(roots []string) {
+	next := w.config()
+	next.Roots = slices.Clone(roots)
+	w.cfg.Store(&next)
+	w.Refresh()
 }
 
 // SetPaused stops or resumes inspection. While paused no git process is
@@ -84,7 +100,6 @@ func (w *Watcher) Refresh() {
 // NewWatcher builds a watcher. Nothing runs until Run is called.
 func NewWatcher(cfg Config, logger *slog.Logger, refresh, rediscover time.Duration) *Watcher {
 	w := &Watcher{
-		cfg:        cfg,
 		logger:     logger,
 		refresh:    max(refresh, minRefresh),
 		rediscover: max(rediscover, minRediscover),
@@ -92,6 +107,7 @@ func NewWatcher(cfg Config, logger *slog.Logger, refresh, rediscover time.Durati
 		resumed:    make(chan struct{}, 1),
 		fetchNow:   make(chan struct{}, 1),
 	}
+	w.cfg.Store(&cfg)
 	w.publish()
 	return w
 }
@@ -115,7 +131,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	defer fsw.Close()
 
 	paths := w.rescan(ctx, fsw, nil)
-	w.logger.Info("watching repositories", "count", len(paths), "roots", w.cfg.Roots)
+	w.logger.Info("watching repositories", "count", len(paths), "roots", w.config().Roots)
 
 	refresh := time.NewTicker(w.refresh)
 	defer refresh.Stop()
@@ -170,7 +186,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 
 // pollOnly is the degraded loop used when fsnotify is unavailable.
 func (w *Watcher) pollOnly(ctx context.Context) error {
-	paths := Discover(ctx, w.cfg)
+	paths := Discover(ctx, w.config())
 	w.inspectAll(ctx, paths)
 
 	refresh := time.NewTicker(w.refresh)
@@ -187,7 +203,7 @@ func (w *Watcher) pollOnly(ctx context.Context) error {
 		case <-w.resumed:
 			w.inspectAll(ctx, paths)
 		case <-rediscover.C:
-			paths = Discover(ctx, w.cfg)
+			paths = Discover(ctx, w.config())
 			w.inspectAll(ctx, paths)
 		}
 	}
@@ -196,7 +212,7 @@ func (w *Watcher) pollOnly(ctx context.Context) error {
 // rescan re-runs discovery, moves the fsnotify watches to match, and inspects
 // everything found.
 func (w *Watcher) rescan(ctx context.Context, fsw *fsnotify.Watcher, old []string) []string {
-	paths := Discover(ctx, w.cfg)
+	paths := Discover(ctx, w.config())
 
 	for _, p := range old {
 		if !slices.Contains(paths, p) {
@@ -292,7 +308,7 @@ func (w *Watcher) publish() {
 	w.mu.Lock()
 	snap := &Snapshot{
 		TakenAt: time.Now(),
-		Roots:   slices.Clone(w.cfg.Roots),
+		Roots:   slices.Clone(w.config().Roots),
 		Repos:   make([]Repo, 0, len(w.repos)),
 	}
 	for _, r := range w.repos {

@@ -42,6 +42,12 @@ type Pausable interface {
 }
 
 // Fetcher is the watcher's background fetch, as the API consumes it.
+// Rooter is the watcher's ability to be pointed somewhere else while running,
+// which is what lets the roots be changed without restarting anything.
+type Rooter interface {
+	SetRoots(roots []string)
+}
+
 type Fetcher interface {
 	SetFetch(enabled bool, every time.Duration)
 }
@@ -159,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/notify", s.handleNotify)
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/fetch", s.handleFetchToggle)
+	mux.HandleFunc("POST /api/roots", s.handleRoots)
 	mux.HandleFunc("POST /api/token/recycle", s.handleRecycleToken)
 
 	// The MCP endpoint is checked per request rather than mounted once, so the
@@ -450,6 +457,49 @@ func (s *Server) handleMonitoring(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFetchToggle switches background fetching and its cadence.
+// handleRoots changes where checkouts are looked for. The roots used to live in
+// the systemd unit's ExecStart line, which meant changing them meant rewriting a
+// service file and restarting; they are configuration, so they live in the
+// store, and the watcher is told to look again.
+func (s *Server) handleRoots(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Roots []string `json:"roots"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
+			"error": `body must carry "roots"`,
+		})
+		return
+	}
+
+	cleaned := make([]string, 0, len(body.Roots))
+	for _, root := range body.Roots {
+		if trimmed := strings.TrimSpace(root); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	if len(cleaned) == 0 {
+		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
+			"error": "at least one directory is needed, or there is nothing to watch",
+		})
+		return
+	}
+
+	s.store.SetRoots(cleaned)
+	if err := s.store.Save(); err != nil {
+		s.logger.Error("persisting roots", "err", err)
+		writeJSON(w, s.logger, http.StatusInternalServerError, map[string]string{
+			"error": "could not persist the setting",
+		})
+		return
+	}
+	if rooter, ok := s.watcher.(Rooter); ok {
+		rooter.SetRoots(cleaned)
+	}
+	s.logger.Info("roots changed", "roots", cleaned)
+	writeJSON(w, s.logger, http.StatusOK, map[string]any{"roots": cleaned})
+}
+
 func (s *Server) handleFetchToggle(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled  *bool `json:"enabled"`
