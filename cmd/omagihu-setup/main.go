@@ -330,14 +330,24 @@ func uninstall(opts options) error {
 		if err != nil {
 			return err
 		}
-		// Remove the store file, never the directory it happens to sit in.
-		// --config can point anywhere, and deleting a parent directory on the
-		// strength of that is how a teardown eats something it should not.
+		// Remove the files omagihu owns, never the directory they happen to sit
+		// in. --config can point anywhere, and deleting a parent directory on
+		// the strength of that is how a teardown eats something it should not.
+		// Each file is named rather than globbed, for the same reason.
 		file := store.Path()
 		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("removing %s: %w", file, err)
 		}
 		fmt.Printf("removed %s including every stored token\n", file)
+
+		// The watches are ours too, and leaving them behind would have a fresh
+		// install inherit the last one's alarms.
+		triggers := filepath.Join(filepath.Dir(file), "triggers.json")
+		if err := os.Remove(triggers); err == nil {
+			fmt.Printf("removed %s\n", triggers)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("removing %s: %w", triggers, err)
+		}
 
 		// Only tidy the enclosing directory when it is ours and now empty.
 		dir := filepath.Dir(file)
