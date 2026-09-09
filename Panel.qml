@@ -173,6 +173,7 @@ Panel {
 
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
   readonly property string helperPath: pluginDir + "/bin/omagihu"
+  readonly property string setupPath: pluginDir + "/bin/omagihu-setup"
 
   // Re-read the daemon's current view, checking first that there is still a
   // helper to read it with.
@@ -302,10 +303,14 @@ Panel {
 
   // Anything needing a prompt or a build runs in a floating terminal, the way
   // the rest of Omarchy does it. The launcher takes one shell string.
+  // Detached on purpose. A Process owned by this panel dies with it, and
+  // launching a terminal takes the focus that closes the card, so the terminal
+  // was being reaped a moment into make: it flashed up, never reached "press
+  // any key to close", and each press only got as far as Go's cache allowed,
+  // which is why it looked like it needed three. execDetached is what the bar
+  // itself uses for exactly this, and hands the terminal to the session.
   function runSetup(command) {
-    if (setupProc.running) return
-    setupProc.script = command
-    setupProc.running = true
+    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", command])
   }
 
   // First run: build the helpers, then install the service. One click instead
@@ -352,7 +357,10 @@ Panel {
   // that shells out fails with a bare "No such file or directory".
   Process {
     id: helperProbe
-    command: ["test", "-x", root.helperPath]
+    // Both helpers, because an interrupted build leaves one without the other
+    // and the panel would otherwise call itself ready while the setup buttons
+    // were still broken.
+    command: ["sh", "-c", "test -x '" + root.helperPath + "' && test -x '" + root.setupPath + "'"]
     onExited: function(code, status) {
       root.helperMissing = code !== 0
       if (root.helperMissing) root.snap = null
@@ -484,19 +492,6 @@ Panel {
     id: copiedReset
     interval: 2500
     onTriggered: root.copied = ""
-  }
-
-  Process {
-    id: setupProc
-    // The command is bound rather than assigned, the way every other process
-    // here does it. Assigning it and starting in the same breath raced: the
-    // first press launched before the new command had taken, so it took two or
-    // three goes at the button before anything happened.
-    property string script: ""
-    command: ["omarchy-launch-floating-terminal-with-presentation", setupProc.script]
-    // The terminal owns the interaction; when it closes, re-read whatever it
-    // changed.
-    onExited: root.refresh()
   }
 
   Process {
