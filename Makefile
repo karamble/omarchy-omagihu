@@ -6,8 +6,9 @@ LDFLAGS := -X main.version=$(VERSION)
 BINARIES := omagihud omagihu omagihu-setup
 
 PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins/karamble.omagihu
-PLUGIN_FILES := manifest.json Panel.qml DashboardView.qml ReposView.qml AlertsView.qml \
-		ArmForm.qml SettingsView.qml ListRow.qml Badge.qml README.md LICENSE preview.png
+PLUGIN_FILES := manifest.json Panel.qml Service.qml DashboardView.qml ReposView.qml \
+		AlertsView.qml ArmForm.qml SettingsView.qml ListRow.qml Badge.qml \
+		README.md LICENSE preview.png
 
 .PHONY: all build test clean install install-check
 

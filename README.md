@@ -200,11 +200,16 @@ bin/omagihu-setup uninstall --purge    # ...and delete the stored tokens too
 omarchy plugin remove karamble.omagihu --yes
 ```
 
-Remove the folder first and the service is left pointing at a binary that is no
-longer there. It will not run: the unit carries a `ConditionPathExists` on the
-daemon, so a removed plugin simply stops starting rather than failing at every
-login. The unit file itself stays until `uninstall` takes it away, so it is
-worth doing in the order above.
+Disabling or removing the plugin stops the daemon by itself. Omarchy runs no
+script of ours on removal, but it does unload the plugin first, and the plugin's
+service entry point takes that as its cue: no widget, no polling. It stops there
+and goes no further, because the same thing happens when you merely switch the
+widget off, and nothing that fires on a toggle should be deleting your tokens.
+
+So removing the folder without the lines above leaves the daemon stopped rather
+than orphaned. The unit also carries a `ConditionPathExists` on the daemon, so
+it will not come back at the next login either. What survives is the unit file
+and your account store, which is what `uninstall --purge` is for.
 
 Updating is gentler: `omarchy plugin update` fetches and resets, so `bin/` is
 left where it is. The binaries are then older than the source beside them, which
