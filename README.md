@@ -206,10 +206,11 @@ daemon, so a removed plugin simply stops starting rather than failing at every
 login. The unit file itself stays until `uninstall` takes it away, so it is
 worth doing in the order above.
 
-The same applies to updating. `omarchy plugin update` re-clones over the folder
-and `bin/` is not tracked, so the helpers go with it; the daemon keeps running
-from the file it already had open until you rebuild. That is what the second
-line of **Updating** is for.
+Updating is gentler: `omarchy plugin update` fetches and resets, so `bin/` is
+left where it is. The binaries are then older than the source beside them, which
+is what the second line of **Updating** is for. Running `omarchy plugin add`
+again over an existing install is the harsh one: it clones afresh and the
+helpers go with the old folder, so rebuild after that too.
 
 ## Read only, on purpose
 
