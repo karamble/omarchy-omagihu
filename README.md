@@ -47,12 +47,12 @@ Then open the panel. That is the whole setup.
 
 ```bash
 omarchy plugin update karamble.omagihu
-cd ~/.config/omarchy/plugins/karamble.omagihu && make
-systemctl --user restart omagihu.service
+cd ~/.config/omarchy/plugins/karamble.omagihu && make && ./bin/omagihu-setup install
 ```
 
 The update is a git pull inside the plugin folder. The binaries are built
-locally, so the second and third lines are needed every time.
+locally, so the second line is needed every time: it rebuilds them and restarts
+the service onto what it just built.
 
 ## Accounts
 
@@ -121,10 +121,17 @@ bin/omagihu-setup mcp
 
 Paste that into `~/.claude.json` and your coding agent can answer "what is
 uncommitted across all my repos", "is anything waiting on me", or "did demarchy's
-CI pass" without shelling out and guessing. Five read-only tools:
-`omagihu_attention`, `omagihu_inbox`, `omagihu_work`, `omagihu_repos` and
-`omagihu_risk`. Every answer says whether the daemon was awake, so an agent
-never passes stale data off as current.
+CI pass" without shelling out and guessing. Six tools read:
+`omagihu_attention`, `omagihu_inbox`, `omagihu_work`, `omagihu_repos`,
+`omagihu_risk` and `omagihu_facts`. Every answer says whether the daemon was
+awake, so an agent never passes stale data off as current.
+
+Three more let an agent wait for something rather than keep looking:
+`omagihu_catalogue` says what can be watched, `omagihu_alerts` says what already
+is, and `omagihu_agents` says who can be woken. `omagihu_arm`, `omagihu_edit`
+and `omagihu_disarm` change those watches. They write to omagihu's own trigger
+store and to nothing else: no agent instructions are installed anywhere, and
+arming a watch never touches GitHub or a repository.
 
 The bearer token can be recycled from Settings at any time, with a button to
 copy it or the whole config entry straight to the clipboard.
@@ -159,12 +166,6 @@ Four rules keep it from becoming noise: the first sample never fires, a missing
 sample is not a transition, nothing fires while monitoring is off, and every
 watch must carry an expiry, because nothing stays armed for ever.
 
-Agents get the same thing through a skill:
-
-```bash
-bin/omagihu-setup skill --install
-```
-
 ## What it watches locally
 
 Configurable roots, `~/go/src` and `~/Projects` among the defaults. fsnotify
@@ -197,8 +198,13 @@ omarchy plugin remove karamble.omagihu
 ## Read only, on purpose
 
 Omagihu opens things. It never changes them. No pushing, no branch deletion, no
-marking notifications read, nothing written to a remote or to your history. The
-one thing it writes is its own configuration.
+marking notifications read, nothing written to a remote or to your history, and
+nothing written outside its own directory: it installs no instructions for your
+coding agents and touches no configuration but its own.
+
+The only things it writes are its own: the account store, the settings, and the
+watches you or an agent arm. An alert observes and rings. Acting on the reason
+stays your job, which is also what keeps the wake-up free of values.
 
 ## Licence
 

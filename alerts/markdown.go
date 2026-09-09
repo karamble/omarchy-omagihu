@@ -6,9 +6,10 @@ import (
 	"strings"
 )
 
-// CatalogueMarkdown renders the catalogue as the section the agent skill
-// carries. It is generated rather than written so the skill cannot describe a
-// path the daemon does not have, or miss one it does.
+// CatalogueMarkdown renders the catalogue for a person reading it at a
+// terminal. It is generated from Catalogue() rather than written out, so the
+// printed list cannot name a path the daemon does not have, or miss one it
+// does.
 func CatalogueMarkdown() string {
 	leaves := Catalogue()
 

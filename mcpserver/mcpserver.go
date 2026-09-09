@@ -36,6 +36,22 @@ type Source struct {
 	Monitoring func() bool
 	// Facts is the join between the two planes.
 	Facts func() []correlate.Fact
+	// Alerts resolves the trigger engine. It is a function because the daemon
+	// builds this handler before the engine exists, the same reason Monitoring
+	// and Facts are functions; capturing the value here would pin a nil.
+	Alerts func() Alerts
+}
+
+// alerts resolves the engine, reporting false when there is not one to write to.
+func (s Source) alerts() (Alerts, bool) {
+	if s.Alerts == nil {
+		return nil, false
+	}
+	a := s.Alerts()
+	if a == nil {
+		return nil, false
+	}
+	return a, true
 }
 
 // Handler builds the streamable HTTP handler to mount on the daemon's listener.
@@ -46,6 +62,7 @@ func Handler(src Source, version string) http.Handler {
 		Version: version,
 	}, nil)
 	register(server, src)
+	registerAlerts(server, src)
 
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server

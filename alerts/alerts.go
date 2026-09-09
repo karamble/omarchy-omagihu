@@ -104,6 +104,21 @@ func ParseWhere(spec string) (Where, error) {
 	return Where{Field: strings.TrimSpace(field), Op: "=", Value: strings.TrimSpace(value)}, nil
 }
 
+// ParseWhereAll reads a repeatable filter, every clause of which must hold.
+// The command line and the MCP surface both come through here, so the two
+// cannot disagree about what a filter means.
+func ParseWhereAll(raw []string) ([]Where, error) {
+	out := make([]Where, 0, len(raw))
+	for _, spec := range raw {
+		w, err := ParseWhere(spec)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, nil
+}
+
 // State is what the engine remembers between samples.
 type State struct {
 	LastValue     any       `json:"lastValue,omitempty"`
@@ -148,7 +163,7 @@ type Trigger struct {
 	State     State     `json:"state"`
 }
 
-// Status is the one word the panel and the skill use for a trigger.
+// Status is the one word the panel and the tools use for a trigger.
 type Status string
 
 const (

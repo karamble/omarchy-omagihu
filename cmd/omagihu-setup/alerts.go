@@ -36,10 +36,6 @@ type alertFlags struct {
 	once      bool
 	jsonOut   bool
 	dryRun    bool
-	install   bool
-	uninstall bool
-	recipes   bool
-	generate  string
 	seen      map[string]bool
 }
 
@@ -173,7 +169,7 @@ func editAlert(opts options, positional []string) error {
 	}
 
 	if f.given("--where") {
-		where, err := parseWhere(f.where)
+		where, err := alerts.ParseWhereAll(f.where)
 		if err != nil {
 			return err
 		}
@@ -238,7 +234,7 @@ func applyFlags(t *alerts.Trigger, f alertFlags, now time.Time) error {
 		OlderThan: f.olderThan,
 	}
 
-	where, err := parseWhere(f.where)
+	where, err := alerts.ParseWhereAll(f.where)
 	if err != nil {
 		return err
 	}
@@ -253,24 +249,6 @@ func applyFlags(t *alerts.Trigger, f alertFlags, now time.Time) error {
 	t.Standing = f.standing && !f.once
 	t.ArmedAt = now
 	return nil
-}
-
-// parseWhere reads the repeatable filter, which is field=value for an exact
-// match or field~=text for a case-insensitive substring.
-func parseWhere(raw []string) ([]alerts.Where, error) {
-	out := make([]alerts.Where, 0, len(raw))
-	for _, w := range raw {
-		if field, value, ok := strings.Cut(w, "~="); ok {
-			out = append(out, alerts.Where{Field: strings.TrimSpace(field), Op: "~=", Value: value})
-			continue
-		}
-		field, value, ok := strings.Cut(w, "=")
-		if !ok {
-			return nil, fmt.Errorf("bad --where %q: use field=value or field~=text", w)
-		}
-		out = append(out, alerts.Where{Field: strings.TrimSpace(field), Op: "=", Value: value})
-	}
-	return out, nil
 }
 
 // warnUnwatched says so when a watch is being stored with nothing running to

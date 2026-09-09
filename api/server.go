@@ -126,6 +126,17 @@ func (s *Server) applyFetch() {
 	}
 }
 
+// alertEngine hands the MCP surface the engine, or nothing at all. It is called
+// per request rather than once, because the daemon builds the handler before the
+// engine exists. Returning the pointer directly when it is nil would wrap that
+// nil in a non-nil interface, which reads as present and then panics.
+func (s *Server) alertEngine() mcpserver.Alerts {
+	if s.engine == nil {
+		return nil
+	}
+	return s.engine
+}
+
 // Handler returns the routed, authenticated handler tree.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -157,6 +168,7 @@ func (s *Server) Handler() http.Handler {
 		Local:      s.watcher,
 		Monitoring: s.store.MonitoringEnabled,
 		Facts:      s.Facts,
+		Alerts:     s.alertEngine,
 	}, s.version)
 	mux.Handle("/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.store.MCPActive() {
@@ -535,7 +547,7 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCatalogue serves what can be watched, which the panel's path picker and
-// the agent skill both read.
+// the omagihu_catalogue tool both read.
 func (s *Server) handleCatalogue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.logger, http.StatusOK, map[string]any{"paths": alerts.Catalogue()})
 }

@@ -51,7 +51,6 @@ alerts:
   arm PATH OP     arm a watch; see the catalogue for paths and operators
   edit ID         change a watch's terms, keeping its id and its owner
   disarm ID       remove a watch
-  skill           install the agent skill: --install, --uninstall, --recipes
 
 flags:
   --config PATH   store location (default ~/.config/omagihu/accounts.json)
@@ -118,8 +117,6 @@ func run(args []string) error {
 		return editAlert(opts, positional)
 	case "disarm":
 		return disarmAlert(opts, positional)
-	case "skill":
-		return manageSkill(opts)
 	case "help", "-h", "--help":
 		fmt.Println(usage())
 		return nil
@@ -220,7 +217,12 @@ func install(opts options) error {
 	if err := systemctl("daemon-reload"); err != nil {
 		return err
 	}
-	if err := systemctl("enable", "--now", serviceName); err != nil {
+	if err := systemctl("enable", serviceName); err != nil {
+		return err
+	}
+	// Restart rather than start: install is also how an update is finished, and
+	// a service that is already up would otherwise keep running the old binary.
+	if err := systemctl("restart", serviceName); err != nil {
 		return err
 	}
 	fmt.Println()
@@ -420,15 +422,6 @@ func parseFlags(args []string) (options, []string, error) {
 		case "--json":
 			opts.alerts.jsonOut = true
 			continue
-		case "--install":
-			opts.alerts.install = true
-			continue
-		case "--uninstall":
-			opts.alerts.uninstall = true
-			continue
-		case "--recipes":
-			opts.alerts.recipes = true
-			continue
 		}
 		if !hasInline {
 			if i+1 >= len(args) {
@@ -465,8 +458,6 @@ func parseFlags(args []string) (options, []string, error) {
 			opts.alerts.olderThan = value
 		case "--where":
 			opts.alerts.where = append(opts.alerts.where, value)
-		case "--generate":
-			opts.alerts.generate = value
 		case "--above", "--below", "--rearm":
 			n, err := strconv.ParseFloat(value, 64)
 			if err != nil {

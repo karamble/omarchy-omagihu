@@ -9,7 +9,7 @@ PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins/karamble.omagihu
 PLUGIN_FILES := manifest.json Panel.qml DashboardView.qml ReposView.qml AlertsView.qml \
 		ArmForm.qml SettingsView.qml ListRow.qml Badge.qml README.md LICENSE preview.png
 
-.PHONY: all build test clean install install-check skill skill-check
+.PHONY: all build test clean install install-check
 
 all: build
 
@@ -44,22 +44,3 @@ install-check:
 	@command -v go >/dev/null || { echo "go toolchain not found"; exit 1; }
 	@command -v git >/dev/null || { echo "git not found"; exit 1; }
 	@echo "toolchain ok"
-
-# The skill's catalogue section is generated from alerts.Catalogue(), so the
-# paths an agent is told about cannot drift from the ones the daemon offers.
-# The skill is embedded, so regenerating it means rebuilding after.
-skill: build
-	./bin/omagihu-setup skill --generate skill/SKILL.md
-	$(MAKE) build
-
-# Fails when the committed skill is stale, which is the only way to notice that
-# the catalogue moved and the skill did not.
-skill-check: build
-	@cp skill/SKILL.md .skill.orig
-	@./bin/omagihu-setup skill --generate skill/SKILL.md >/dev/null
-	@if ! cmp -s skill/SKILL.md .skill.orig; then \
-		cp .skill.orig skill/SKILL.md; rm -f .skill.orig; \
-		echo "skill/SKILL.md is stale: run make skill"; exit 1; \
-	fi
-	@rm -f .skill.orig
-	@echo "skill catalogue is current"
