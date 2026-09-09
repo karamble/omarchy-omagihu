@@ -116,6 +116,7 @@ Rectangle {
         text: modelData.text !== undefined ? modelData.text : ""
         tone: modelData.tone !== undefined ? modelData.tone : Color.accent
         loud: modelData.loud === true
+        compact: modelData.compact === true
         fontFamily: row.fontFamily
       }
     }

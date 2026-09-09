@@ -22,6 +22,22 @@ Column {
   readonly property var reviews: work && work.reviewRequests ? work.reviewRequests : []
   readonly property var authored: work && work.authoredPrs ? work.authoredPrs : []
   readonly property var issues: work && work.assignedIssues ? work.assignedIssues : []
+  // Issues you opened. Their labels are where a submission's state lives, which
+  // is invisible from the notification alone.
+  readonly property var allOpened: work && work.authoredIssues ? work.authoredIssues : []
+  // An issue you filed years ago and nobody has touched is not dashboard
+  // material. The daemon keeps the whole list for agents to read; this page
+  // shows the ones that have actually moved.
+  readonly property int openedWindowDays: 7
+  readonly property var opened: {
+    var out = []
+    var cutoff = Date.now() - view.openedWindowDays * 86400000
+    for (var i = 0; i < view.allOpened.length; i++) {
+      var at = Date.parse(view.allOpened[i].updatedAt)
+      if (!isNaN(at) && at >= cutoff) out.push(view.allOpened[i])
+    }
+    return out
+  }
   readonly property var inbox: snap && snap.inbox ? snap.inbox : []
   readonly property var att: snap && snap.attention ? snap.attention : null
   readonly property var facts: snap && snap.facts ? snap.facts : []
@@ -45,6 +61,7 @@ Column {
   readonly property bool showBroken: (filter === "all" || filter === "broken") && brokenPrs.length > 0
   readonly property bool showInbox: (filter === "all" || filter === "inbox") && inbox.length > 0
   readonly property bool showFacts: (filter === "all" || filter === "reconcile") && facts.length > 0
+  readonly property bool showOpened: (filter === "all" || filter === "opened") && opened.length > 0
 
   spacing: Style.space(10)
 
@@ -104,6 +121,32 @@ Column {
     return view.owner.iconWarn
   }
 
+  // GitHub gives each label its own hex, and some repositories choose colours
+  // that vanish against a dark panel, so anything too dark is lifted until it
+  // can be read. The hue is kept: it is what makes a label recognisable.
+  function labelTone(hex) {
+    var c = Qt.color("#" + String(hex || "888888"))
+    var luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+    if (luma >= 0.45) return c
+    return Qt.lighter(c, 1.0 + (0.45 - luma) * 2.2)
+  }
+
+  // Four bubbles is what fits beside a title on this card. Anything past that
+  // is counted rather than dropped silently, and the row opens the issue.
+  readonly property int maxLabels: 4
+
+  function labelBadges(issue) {
+    var out = []
+    var labels = issue.labels || []
+    var shown = Math.min(labels.length, view.maxLabels)
+    for (var i = 0; i < shown; i++)
+      out.push({ text: labels[i].name, tone: view.labelTone(labels[i].color), compact: true })
+    if (labels.length > shown)
+      out.push({ text: "+" + (labels.length - shown),
+                 tone: Qt.darker(view.foreground, 1.3), compact: true })
+    return out
+  }
+
   function inboxBadge(n) {
     var reason = String(n.reason || "").toUpperCase().replace("_", " ")
     var tone = Color.accent
@@ -123,14 +166,16 @@ Column {
     { key: "reviews", label: "Reviews", count: view.reviews.length, urgent: view.reviews.length > 0 },
     { key: "broken", label: "Needs fixing", count: view.brokenPrs.length, urgent: view.brokenPrs.length > 0 },
     { key: "inbox", label: "Inbox", count: view.inbox.length, urgent: false },
-    { key: "reconcile", label: "Reconcile", count: view.facts.length, urgent: view.urgentFacts > 0 }
+    { key: "reconcile", label: "Reconcile", count: view.facts.length, urgent: view.urgentFacts > 0 },
+    { key: "opened", label: "Opened", count: view.opened.length, urgent: false }
   ]
 
   readonly property int reviewOffset: 1
   readonly property int brokenOffset: view.reviewOffset + (view.showReviews ? view.reviews.length : 0)
   readonly property int factOffset: view.brokenOffset + (view.showBroken ? view.brokenPrs.length : 0)
   readonly property int inboxOffset: view.factOffset + (view.showFacts ? view.facts.length : 0)
-  readonly property int moreRow: view.inboxOffset + (view.showInbox ? view.inbox.length : 0)
+  readonly property int openedOffset: view.inboxOffset + (view.showInbox ? view.inbox.length : 0)
+  readonly property int moreRow: view.openedOffset + (view.showOpened ? view.opened.length : 0)
 
   readonly property int rowCount: view.moreRow + 1
   readonly property bool formFocused: false
@@ -151,8 +196,10 @@ Column {
       url = view.brokenPrs[row - view.brokenOffset].url
     else if (view.showFacts && row < view.inboxOffset)
       url = view.facts[row - view.factOffset].url
-    else if (view.showInbox)
+    else if (view.showInbox && row < view.openedOffset)
       url = view.inbox[row - view.inboxOffset].webUrl
+    else if (view.showOpened)
+      url = view.opened[row - view.openedOffset].url
     if (url) view.owner.openUrl(url)
   }
 
@@ -288,9 +335,33 @@ Column {
       }
     }
 
+    // ----- issues you opened -----
+    PanelSectionHeader {
+      visible: view.showOpened
+      text: "ISSUES YOU OPENED"
+      foreground: view.foreground
+      fontFamily: view.fontFamily
+    }
+
+    Repeater {
+      model: view.showOpened ? view.opened : []
+      delegate: ListRow {
+        hasCursor: view.owner.cursor === view.openedOffset + index
+        width: listColumn.width
+        icon: view.owner.iconDot
+        tone: Color.accent
+        fontFamily: view.fontFamily
+        title: "#" + modelData.number + "  " + modelData.title
+        subtitle: modelData.repo + " • " + view.ago(modelData.updatedAt)
+        badges: view.labelBadges(modelData)
+        onActivated: view.owner.openUrl(modelData.url)
+      }
+    }
+
     // ----- nothing matches -----
     Rectangle {
-      visible: !view.showReviews && !view.showBroken && !view.showInbox && !view.showFacts
+      visible: !view.showReviews && !view.showBroken && !view.showInbox
+               && !view.showFacts && !view.showOpened
       width: listColumn.width
       implicitHeight: Style.space(70)
       radius: Style.cornerRadius > 0 ? Style.space(6) : 0

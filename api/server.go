@@ -284,6 +284,7 @@ type workResponse struct {
 	AuthoredPRs    []forge.PullRequest `json:"authoredPrs"`
 	ReviewRequests []forge.PullRequest `json:"reviewRequests"`
 	AssignedIssues []forge.Issue       `json:"assignedIssues"`
+	AuthoredIssues []forge.Issue       `json:"authoredIssues"`
 	MergedPRs      []forge.PullRequest `json:"mergedPrs"`
 }
 
@@ -297,12 +298,14 @@ func (s *Server) mergedWork(snap *poll.Snapshot) workResponse {
 		AuthoredPRs:    []forge.PullRequest{},
 		ReviewRequests: []forge.PullRequest{},
 		AssignedIssues: []forge.Issue{},
+		AuthoredIssues: []forge.Issue{},
 		MergedPRs:      []forge.PullRequest{},
 	}
 	merged := make(map[string]struct{})
 	authored := make(map[string]struct{})
 	reviewing := make(map[string]struct{})
 	assigned := make(map[string]struct{})
+	opened := make(map[string]struct{})
 
 	for _, a := range snap.Accounts {
 		for _, pr := range a.AuthoredPRs {
@@ -326,6 +329,13 @@ func (s *Server) mergedWork(snap *poll.Snapshot) workResponse {
 			assigned[is.URL] = struct{}{}
 			resp.AssignedIssues = append(resp.AssignedIssues, is)
 		}
+		for _, is := range a.AuthoredIssues {
+			if _, dup := opened[is.URL]; dup {
+				continue
+			}
+			opened[is.URL] = struct{}{}
+			resp.AuthoredIssues = append(resp.AuthoredIssues, is)
+		}
 		for _, pr := range a.MergedPRs {
 			if _, dup := merged[pr.URL]; dup {
 				continue
@@ -338,9 +348,9 @@ func (s *Server) mergedWork(snap *poll.Snapshot) workResponse {
 	byUpdated := func(a, b forge.PullRequest) int { return b.UpdatedAt.Compare(a.UpdatedAt) }
 	slices.SortFunc(resp.AuthoredPRs, byUpdated)
 	slices.SortFunc(resp.ReviewRequests, byUpdated)
-	slices.SortFunc(resp.AssignedIssues, func(a, b forge.Issue) int {
-		return b.UpdatedAt.Compare(a.UpdatedAt)
-	})
+	byIssueUpdated := func(a, b forge.Issue) int { return b.UpdatedAt.Compare(a.UpdatedAt) }
+	slices.SortFunc(resp.AssignedIssues, byIssueUpdated)
+	slices.SortFunc(resp.AuthoredIssues, byIssueUpdated)
 	return resp
 }
 

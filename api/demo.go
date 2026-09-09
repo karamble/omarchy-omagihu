@@ -109,6 +109,21 @@ func Demo() any {
 		},
 	}
 
+	// An issue you opened, carrying the labels that say where it stands. This is
+	// the state a notification cannot show.
+	opened := []forge.Issue{
+		{
+			AccountID: "demo", Repo: "octosmith/harbourmaster", Number: 44,
+			Title: "Publish the manifest schema alongside the release",
+			URL:   "https://github.com/octosmith/harbourmaster/issues/44",
+			Labels: []forge.Label{
+				{Name: "accepted", Color: "0e8a16"},
+				{Name: "needs-docs", Color: "d4c5f9"},
+			},
+			UpdatedAt: ago(3 * time.Hour),
+		},
+	}
+
 	issues := []forge.Issue{
 		{
 			AccountID: "demo", Repo: "octosmith/lanternfish", Number: 31,
@@ -170,6 +185,7 @@ func Demo() any {
 			AuthoredPRs:    authored,
 			ReviewRequests: reviews,
 			AssignedIssues: issues,
+			AuthoredIssues: opened,
 			MergedPRs:      []forge.PullRequest{},
 		},
 		Repos: repos,

@@ -174,13 +174,22 @@ type PullRequest struct {
 	UpdatedAt      time.Time `json:"updatedAt,omitzero"`
 }
 
-// Issue is one issue assigned to the account.
+// Label is one label on an issue. The colour is GitHub's own six-character hex
+// for that label, carried through so the panel can paint each one as its
+// repository defines it rather than inventing a palette.
+type Label struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
+// Issue is one issue the account is assigned to or opened.
 type Issue struct {
 	AccountID string    `json:"accountId"`
 	Repo      string    `json:"repo"`
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
 	URL       string    `json:"url"`
+	Labels    []Label   `json:"labels,omitempty"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 }
 
@@ -190,6 +199,9 @@ type Workload struct {
 	AuthoredPRs    []PullRequest `json:"authoredPrs"`
 	ReviewRequests []PullRequest `json:"reviewRequests"`
 	AssignedIssues []Issue       `json:"assignedIssues"`
+	// AuthoredIssues are the issues you opened. A submission under review, a
+	// bug you filed upstream: the labels on them are where their state lives.
+	AuthoredIssues []Issue `json:"authoredIssues"`
 	// MergedPRs are recently merged pull requests of yours. They are what makes
 	// a finished local branch identifiable as finished.
 	MergedPRs []PullRequest `json:"mergedPrs"`
@@ -210,13 +222,17 @@ query {
     nodes { ...prFields }
   }
   assigned: search(query: "is:open is:issue assignee:@me archived:false", type: ISSUE, first: 50) {
-    nodes {
-      ... on Issue {
-        number title url updatedAt
-        repository { nameWithOwner }
-      }
-    }
+    nodes { ...issueFields }
   }
+  authoredIssues: search(query: "is:open is:issue author:@me archived:false", type: ISSUE, first: 50) {
+    nodes { ...issueFields }
+  }
+}
+
+fragment issueFields on Issue {
+  number title url updatedAt
+  repository { nameWithOwner }
+  labels(first: 10) { nodes { name color } }
 }
 
 fragment prFields on PullRequest {
@@ -292,20 +308,11 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 			Viewer struct {
 				Login string `json:"login"`
 			} `json:"viewer"`
-			Authored  struct{ Nodes []gqlPR } `json:"authored"`
-			Reviewing struct{ Nodes []gqlPR } `json:"reviewing"`
-			Merged    struct{ Nodes []gqlPR } `json:"merged"`
-			Assigned  struct {
-				Nodes []struct {
-					Number     int       `json:"number"`
-					Title      string    `json:"title"`
-					URL        string    `json:"url"`
-					UpdatedAt  time.Time `json:"updatedAt"`
-					Repository struct {
-						NameWithOwner string `json:"nameWithOwner"`
-					} `json:"repository"`
-				} `json:"nodes"`
-			} `json:"assigned"`
+			Authored       struct{ Nodes []gqlPR }    `json:"authored"`
+			Reviewing      struct{ Nodes []gqlPR }    `json:"reviewing"`
+			Merged         struct{ Nodes []gqlPR }    `json:"merged"`
+			Assigned       struct{ Nodes []gqlIssue } `json:"assigned"`
+			AuthoredIssues struct{ Nodes []gqlIssue } `json:"authoredIssues"`
 		} `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
@@ -329,16 +336,40 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 		work.MergedPRs = append(work.MergedPRs, c.toPR(n))
 	}
 	for _, n := range out.Data.Assigned.Nodes {
-		work.AssignedIssues = append(work.AssignedIssues, Issue{
-			AccountID: c.account.ID,
-			Repo:      n.Repository.NameWithOwner,
-			Number:    n.Number,
-			Title:     n.Title,
-			URL:       n.URL,
-			UpdatedAt: n.UpdatedAt,
-		})
+		work.AssignedIssues = append(work.AssignedIssues, c.toIssue(n))
+	}
+	for _, n := range out.Data.AuthoredIssues.Nodes {
+		work.AuthoredIssues = append(work.AuthoredIssues, c.toIssue(n))
 	}
 	return work, rate, nil
+}
+
+// gqlIssue is the issueFields fragment as it comes back, shared by both issue
+// searches so the two cannot decode differently.
+type gqlIssue struct {
+	Number     int       `json:"number"`
+	Title      string    `json:"title"`
+	URL        string    `json:"url"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	Repository struct {
+		NameWithOwner string `json:"nameWithOwner"`
+	} `json:"repository"`
+	Labels struct {
+		Nodes []Label `json:"nodes"`
+	} `json:"labels"`
+}
+
+// toIssue converts one decoded node, the way toPR does for pull requests.
+func (c *Client) toIssue(n gqlIssue) Issue {
+	return Issue{
+		AccountID: c.account.ID,
+		Repo:      n.Repository.NameWithOwner,
+		Number:    n.Number,
+		Title:     n.Title,
+		URL:       n.URL,
+		Labels:    n.Labels.Nodes,
+		UpdatedAt: n.UpdatedAt,
+	}
 }
 
 func (c *Client) toPR(n gqlPR) PullRequest {

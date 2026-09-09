@@ -99,6 +99,7 @@ type workOut struct {
 	AuthoredPRs    []forge.PullRequest `json:"authoredPrs"`
 	ReviewRequests []forge.PullRequest `json:"reviewRequests"`
 	AssignedIssues []forge.Issue       `json:"assignedIssues"`
+	AuthoredIssues []forge.Issue       `json:"authoredIssues"`
 }
 
 type reposOut struct {
@@ -132,12 +133,13 @@ func register(s *mcp.Server, src Source) {
 		Description: "Open pull requests you authored, pull requests awaiting your review, " +
 			"and issues assigned to you. Pull requests carry their CI rollup and review decision.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, workOut, error) {
-		authored, reviews, issues := mergedWork(src)
+		authored, reviews, issues, opened := mergedWork(src)
 		return nil, workOut{
 			Status:         src.status(),
 			AuthoredPRs:    authored,
 			ReviewRequests: reviews,
 			AssignedIssues: issues,
+			AuthoredIssues: opened,
 		}, nil
 	})
 
@@ -184,7 +186,7 @@ func register(s *mcp.Server, src Source) {
 		Description: "The one thing that most wants your attention right now, with the full " +
 			"breakdown behind it. Use this to answer 'is anything waiting on me'.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, attentionOut, error) {
-		authored, reviews, _ := mergedWork(src)
+		authored, reviews, _, _ := mergedWork(src)
 		var facts []correlate.Fact
 		if src.Facts != nil {
 			facts = src.Facts()
@@ -222,10 +224,11 @@ func mergedInbox(src Source) []forge.Notification {
 	return out
 }
 
-func mergedWork(src Source) (authored, reviews []forge.PullRequest, issues []forge.Issue) {
+func mergedWork(src Source) (authored, reviews []forge.PullRequest, issues, opened []forge.Issue) {
 	seenPR := make(map[string]struct{})
 	seenReview := make(map[string]struct{})
 	seenIssue := make(map[string]struct{})
+	seenOpened := make(map[string]struct{})
 
 	for _, a := range src.Remote.Snapshot().Accounts {
 		for _, pr := range a.AuthoredPRs {
@@ -246,6 +249,12 @@ func mergedWork(src Source) (authored, reviews []forge.PullRequest, issues []for
 				issues = append(issues, is)
 			}
 		}
+		for _, is := range a.AuthoredIssues {
+			if _, dup := seenOpened[is.URL]; !dup {
+				seenOpened[is.URL] = struct{}{}
+				opened = append(opened, is)
+			}
+		}
 	}
-	return authored, reviews, issues
+	return authored, reviews, issues, opened
 }

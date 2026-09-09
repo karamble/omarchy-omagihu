@@ -44,6 +44,7 @@ type AccountView struct {
 	AuthoredPRs    []forge.PullRequest  `json:"authoredPrs"`
 	ReviewRequests []forge.PullRequest  `json:"reviewRequests"`
 	AssignedIssues []forge.Issue        `json:"assignedIssues"`
+	AuthoredIssues []forge.Issue        `json:"authoredIssues"`
 	MergedPRs      []forge.PullRequest  `json:"mergedPrs"`
 	Rate           forge.Rate           `json:"rate"`
 	InboxAt        time.Time            `json:"inboxAt,omitzero"`
@@ -291,6 +292,7 @@ func (p *Poller) workLoop(ctx context.Context, c Client) {
 				v.AuthoredPRs = work.AuthoredPRs
 				v.ReviewRequests = work.ReviewRequests
 				v.AssignedIssues = work.AssignedIssues
+				v.AuthoredIssues = work.AuthoredIssues
 				v.MergedPRs = work.MergedPRs
 				v.Rate = rate
 				v.WorkAt = time.Now()
