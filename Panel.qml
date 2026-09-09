@@ -304,7 +304,7 @@ Panel {
   // the rest of Omarchy does it. The launcher takes one shell string.
   function runSetup(command) {
     if (setupProc.running) return
-    setupProc.command = ["omarchy-launch-floating-terminal-with-presentation", command]
+    setupProc.script = command
     setupProc.running = true
   }
 
@@ -488,6 +488,12 @@ Panel {
 
   Process {
     id: setupProc
+    // The command is bound rather than assigned, the way every other process
+    // here does it. Assigning it and starting in the same breath raced: the
+    // first press launched before the new command had taken, so it took two or
+    // three goes at the button before anything happened.
+    property string script: ""
+    command: ["omarchy-launch-floating-terminal-with-presentation", setupProc.script]
     // The terminal owns the interaction; when it closes, re-read whatever it
     // changed.
     onExited: root.refresh()
