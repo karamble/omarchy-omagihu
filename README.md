@@ -40,6 +40,23 @@ builds nothing else. `install` then seeds your first account from the `gh` CLI
 and asks which folders hold your checkouts. The panel tells you plainly if you
 skip either step, rather than sitting on "connecting" for ever.
 
+### What the build guarantees
+
+`make` runs in your shell, with your PATH, because that is what building from
+source means. Within that, the build is pinned rather than open-ended:
+
+- `GOTOOLCHAIN=local` means the go command uses the toolchain you installed. It
+  will not silently fetch a different one over the network.
+- `-mod=readonly` refuses to edit `go.mod` or `go.sum` mid-build, and
+  `make verify` runs `go mod verify` before anything compiles, so every module
+  matches the checksum committed here and cross-checked against the public
+  checksum database.
+- `-trimpath` keeps local paths out of the binaries, so the same inputs produce
+  the same bytes. Two builds of the same commit are byte-identical.
+
+Dependencies are not vendored. The bytes would be the same either way, and
+`go.sum` is what verifies them.
+
 There is no service to install. Omarchy runs the daemon for as long as the
 plugin is enabled and stops it when it is not, so omagihu writes nothing outside
 this folder and `~/.config/omagihu`.

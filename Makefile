@@ -3,6 +3,19 @@
 
 VERSION ?= 0.1.0
 LDFLAGS := -X main.version=$(VERSION)
+
+# Tools are named through variables so a packager can point them elsewhere.
+GO ?= go
+
+# Pin the compiler. Without this the go command will fetch a different
+# toolchain over the network to satisfy the directive in go.mod; with it the
+# build uses the toolchain that is installed, or fails and says so.
+export GOTOOLCHAIN = local
+
+# readonly refuses to edit go.mod or go.sum during a build, so every module is
+# the one the committed checksums name. trimpath keeps the output free of local
+# paths, so the same inputs give the same bytes.
+BUILDFLAGS := -trimpath -mod=readonly
 BINARIES := omagihud omagihu omagihu-setup
 
 PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins/karamble.omagihu
@@ -10,15 +23,15 @@ PLUGIN_FILES := manifest.json Panel.qml Service.qml DashboardView.qml ReposView.
 		AlertsView.qml ArmForm.qml SettingsView.qml ListRow.qml Badge.qml \
 		README.md LICENSE preview.png
 
-.PHONY: all build test clean install install-check
+.PHONY: all build test verify clean install install-check
 
 all: build
 
-build:
+build: verify
 	@mkdir -p bin
 	@for b in $(BINARIES); do \
 		echo "building bin/$$b"; \
-		go build -ldflags "$(LDFLAGS)" -o bin/$$b ./cmd/$$b || exit 1; \
+		$(GO) build $(BUILDFLAGS) -ldflags "$(LDFLAGS)" -o bin/$$b ./cmd/$$b || exit 1; \
 	done
 	@echo
 	@echo "built. next:"
@@ -26,7 +39,7 @@ build:
 	@echo "  ./bin/omagihud               start the daemon"
 
 test:
-	go test -race ./...
+	$(GO) test -race ./...
 
 # Omarchy refuses symlinks inside a plugin folder, so installing copies the
 # QML, the manifest and the built binaries into place.
@@ -41,7 +54,11 @@ install: build
 clean:
 	rm -rf bin
 
-install-check:
-	@command -v go >/dev/null || { echo "go toolchain not found"; exit 1; }
+# Check every module against the committed checksums before anything compiles.
+verify:
+	@$(GO) mod verify >/dev/null || { echo "module verification failed"; exit 1; }
+
+install-check: verify
+	@command -v $(GO) >/dev/null || { echo "go toolchain not found"; exit 1; }
 	@command -v git >/dev/null || { echo "git not found"; exit 1; }
-	@echo "toolchain ok"
+	@echo "toolchain ok, modules verified"
