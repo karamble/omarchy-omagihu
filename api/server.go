@@ -412,7 +412,7 @@ func (s *Server) handleMonitoring(w http.ResponseWriter, r *http.Request) {
 		Enabled     *bool `json:"enabled"`
 		IntervalMin *int  `json:"intervalMin"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil ||
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil ||
 		(body.Enabled == nil && body.IntervalMin == nil) {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
 			"error": `body must carry "enabled" and/or "intervalMin"`,
@@ -465,7 +465,7 @@ func (s *Server) handleRoots(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Roots []string `json:"roots"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
 			"error": `body must carry "roots"`,
 		})
@@ -505,7 +505,7 @@ func (s *Server) handleFetchToggle(w http.ResponseWriter, r *http.Request) {
 		Enabled  *bool `json:"enabled"`
 		EveryMin *int  `json:"everyMin"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil ||
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil ||
 		(body.Enabled == nil && body.EveryMin == nil) {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
 			"error": `body must carry "enabled" and/or "everyMin"`,
@@ -631,7 +631,7 @@ func (s *Server) handleArm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var t alerts.Trigger
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&t); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&t); err != nil {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{"error": "unreadable trigger"})
 		return
 	}
@@ -656,7 +656,7 @@ func (s *Server) handleEdit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, s.logger, http.StatusServiceUnavailable, map[string]string{"error": "alerts are not running"})
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{"error": "unreadable body"})
 		return
@@ -753,7 +753,7 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		Domain  string `json:"domain"`
 		Enabled *bool  `json:"enabled"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || body.Enabled == nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || body.Enabled == nil {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
 			"error": `body must be {"domain":"reviews|broken|inbox|local","enabled":true|false}`,
 		})
@@ -783,7 +783,7 @@ func (s *Server) handleMCPToggle(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled *bool `json:"enabled"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || body.Enabled == nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || body.Enabled == nil {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
 			"error": `body must be {"enabled": true|false}`,
 		})
