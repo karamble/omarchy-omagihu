@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/karamble/omarchy-omagihu/store"
 )
 
 // Operator is how a path is watched. Six, chosen for this data: almost
@@ -274,7 +276,11 @@ func Load(path string) (*Store, error) {
 	if path == "" {
 		path = DefaultPath()
 	}
-	raw, err := os.ReadFile(path)
+	dir, err := store.Shared(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	raw, err := dir.Read(filepath.Base(path), 0o600)
 	if errors.Is(err, fs.ErrNotExist) {
 		return &Store{Version: 1, path: path}, nil
 	}
@@ -302,35 +308,17 @@ func (s *Store) Save() error {
 		s.Version = 1
 	}
 
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating %s: %w", dir, err)
-	}
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding triggers: %w", err)
 	}
 	raw = append(raw, '\n')
 
-	tmp, err := os.CreateTemp(dir, ".triggers-*.json")
+	dir, err := store.Shared(filepath.Dir(s.path))
 	if err != nil {
-		return fmt.Errorf("creating temp file in %s: %w", dir, err)
+		return err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod %s: %w", tmpName, err)
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return fmt.Errorf("writing %s: %w", tmpName, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmpName, err)
-	}
-	return os.Rename(tmpName, s.path)
+	return dir.Write(filepath.Base(s.path), raw, 0o600)
 }
 
 // Path reports where the store lives.

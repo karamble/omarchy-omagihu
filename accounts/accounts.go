@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/karamble/omarchy-omagihu/store"
 )
 
 // ErrNotConfigured reports that no store exists yet. The daemon turns this into
@@ -248,18 +250,14 @@ func Load(path string) (*Store, error) {
 	if path == "" {
 		path = DefaultPath()
 	}
-	info, err := os.Stat(path)
+	dir, err := store.Shared(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	raw, err := dir.Read(filepath.Base(path), 0o600)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("%s: %w", path, ErrNotConfigured)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("stat %s: %w", path, err)
-	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("%s is mode %04o, want 0600: it holds tokens", path, perm)
-	}
-
-	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
@@ -287,38 +285,17 @@ func (s *Store) Save() error {
 		s.APIToken = tok
 	}
 
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating %s: %w", dir, err)
-	}
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding store: %w", err)
 	}
 	raw = append(raw, '\n')
 
-	tmp, err := os.CreateTemp(dir, ".accounts-*.json")
+	dir, err := store.Shared(filepath.Dir(s.path))
 	if err != nil {
-		return fmt.Errorf("creating temp file in %s: %w", dir, err)
+		return err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod %s: %w", tmpName, err)
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return fmt.Errorf("writing %s: %w", tmpName, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmpName, err)
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("renaming into %s: %w", s.path, err)
-	}
-	return nil
+	return dir.Write(filepath.Base(s.path), raw, 0o600)
 }
 
 // Path reports where the store was loaded from or will be written.

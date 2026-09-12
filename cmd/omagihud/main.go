@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/karamble/omarchy-omagihu/local"
 	"github.com/karamble/omarchy-omagihu/notify"
 	"github.com/karamble/omarchy-omagihu/poll"
+	filestore "github.com/karamble/omarchy-omagihu/store"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
@@ -66,6 +68,14 @@ func run(ctx context.Context) error {
 	}
 	if store.APIToken == "" {
 		return fmt.Errorf("%s has no apiToken: run omagihu-setup", store.Path())
+	}
+
+	// Clear temporary files left by a write that was interrupted, including the
+	// names the previous CreateTemp-based writers used.
+	if d, err := filestore.Shared(filepath.Dir(store.Path())); err == nil {
+		if n, err := d.Sweep(".accounts-", ".triggers-"); err == nil && n > 0 {
+			logger.Info("swept interrupted writes", "files", n)
+		}
 	}
 
 	logger.Info("starting",
