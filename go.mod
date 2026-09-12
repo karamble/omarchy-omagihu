@@ -1,6 +1,6 @@
 module github.com/karamble/omarchy-omagihu
 
-go 1.27.1
+go 1.26.0
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "karamble.omagihu",
   "name": "Omagihu",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "karamble",
   "license": "ISC",
   "description": "Developer and account centric GitHub radar: what is waiting on you, what is in flight, and where local work is at risk",

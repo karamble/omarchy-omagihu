@@ -35,7 +35,7 @@ bin/omagihu-setup install
 ```
 
 **The last two lines matter.** No binaries are shipped here, so the three small
-Go helpers are compiled on your own machine. It needs Go 1.24 or newer and
+Go helpers are compiled on your own machine. It needs Go 1.26 or newer and
 builds nothing else. `install` then seeds your first account from the `gh` CLI
 and asks which folders hold your checkouts. The panel tells you plainly if you
 skip either step, rather than sitting on "connecting" for ever.
