@@ -12,10 +12,17 @@ GO ?= go
 # build uses the toolchain that is installed, or fails and says so.
 export GOTOOLCHAIN = local
 
+# Go turns cgo on whenever it finds a C compiler and off when it does not, so
+# the same source silently produces different binaries on different machines,
+# and picks a different DNS resolver with it. Pin it off: no C toolchain is
+# needed, and the pure Go resolver is the one that reads resolv.conf directly.
+export CGO_ENABLED = 0
+
 # readonly refuses to edit go.mod or go.sum during a build, so every module is
 # the one the committed checksums name. trimpath keeps the output free of local
-# paths, so the same inputs give the same bytes.
-BUILDFLAGS := -trimpath -mod=readonly
+# paths, and buildvcs=false keeps the git revision out, so the bytes depend on
+# the source and the toolchain and nothing else.
+BUILDFLAGS := -trimpath -mod=readonly -buildvcs=false
 BINARIES := omagihud omagihu omagihu-setup
 
 PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins/karamble.omagihu
