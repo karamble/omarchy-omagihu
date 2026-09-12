@@ -112,4 +112,42 @@ Item {
     running: daemon.running
     onTriggered: if (root.restarts > 0) root.restarts = 0
   }
+
+  // Signal a process and its group. execDetached rather than a Process of our
+  // own, because this is also called while this component is being destroyed,
+  // and a Process owned by it would be torn down before it ran.
+  //
+  // Both the id and its negation: the first reaches the child, the second
+  // reaches anything it spawned when it leads a group, which matters here
+  // because the daemon shells out to git. A target that has already gone makes
+  // kill fail harmlessly.
+  function reap(pid) {
+    if (!pid || pid <= 0) return
+    Quickshell.execDetached(["/usr/bin/kill", "-TERM", "--", String(pid), "-" + pid])
+  }
+
+  // The probe is a one-shot test that should answer immediately. If it ever
+  // does not, stop it rather than leaving a process and its collector alive.
+  Timer {
+    id: probeWatchdog
+    interval: 10000
+    repeat: false
+    running: probe.running
+    onTriggered: {
+      if (!probe.running) return
+      root.reap(probe.processId)
+      probe.running = false
+      root.lastError = "the build probe did not answer"
+    }
+  }
+
+  // Nothing destructive here: this also fires when the widget is toggled off.
+  // Stopping the daemon is not destructive, and reaping its group is what stops
+  // the git processes it spawned from outliving it.
+  Component.onDestruction: {
+    restartTimer.stop()
+    probeWatchdog.stop()
+    root.reap(daemon.processId)
+    daemon.running = false
+  }
 }

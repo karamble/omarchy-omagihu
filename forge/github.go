@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,11 +35,26 @@ type Client struct {
 }
 
 // New builds a client. The account's Token is held in memory only.
+//
+// The transport is spelled out rather than left to http.DefaultTransport,
+// which proxies according to HTTP_PROXY and friends. This client carries a
+// GitHub token, so where it connects should be decided here and not by an
+// environment variable: Proxy is nil, meaning never proxy.
 func New(account accounts.Account, version string) *Client {
 	return &Client{
 		account: account,
-		http:    &http.Client{Timeout: 30 * time.Second},
-		agent:   "omagihu/" + version,
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				Proxy:                 nil,
+				DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 20 * time.Second,
+				MaxIdleConns:          10,
+				IdleConnTimeout:       90 * time.Second,
+			},
+		},
+		agent: "omagihu/" + version,
 	}
 }
 
