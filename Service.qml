@@ -41,13 +41,34 @@ Item {
     return Math.min(30000, 1000 * Math.pow(2, root.restarts))
   }
 
+  // Passed to every child, built once so the two cannot drift.
+  //
+  // Deliberately short. PATH reaches notify-send and herdr, both in /usr/bin,
+  // and git, which the watcher shells out to. HOME finds the configuration and
+  // the checkouts. The session bus is what notify-send needs to reach the
+  // notification daemon; without it every alert is delivered into nothing.
+  // Proxy settings and trust roots are not here on purpose.
+  readonly property var childEnv: ({
+    "PATH": "/usr/bin:/bin",
+    "HOME": Quickshell.env("HOME") || "",
+    "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || "",
+    "DBUS_SESSION_BUS_ADDRESS": Quickshell.env("DBUS_SESSION_BUS_ADDRESS") || "",
+    // runGit passes the daemon's environment to git, and a remote reached over
+    // SSH authenticates through the agent. Without this the background fetch
+    // fails on every private remote, quietly, since GIT_TERMINAL_PROMPT is 0.
+    "SSH_AUTH_SOCK": Quickshell.env("SSH_AUTH_SOCK") || ""
+  })
+
   // The helpers are compiled on the user's machine and bin/ is not shipped, so
   // a fresh install has nothing to run yet. Probing first keeps that quiet:
   // the panel already explains it and offers to build.
   Process {
     id: probe
-    command: ["test", "-x", root.daemonPath]
+    command: ["/usr/bin/test", "-x", root.daemonPath]
     running: true
+    clearEnvironment: true
+    environment: root.childEnv
+
     onExited: function (code, status) {
       if (code === 0) daemon.running = true
       else root.lastError = "not built yet"
@@ -57,6 +78,9 @@ Item {
   Process {
     id: daemon
     command: [root.daemonPath]
+    clearEnvironment: true
+    environment: root.childEnv
+
 
     onExited: function (code, status) {
       // A clean exit is the daemon being told to stop, which happens when this

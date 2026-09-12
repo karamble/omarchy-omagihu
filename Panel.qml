@@ -172,6 +172,12 @@ Panel {
   readonly property color toneOk: "#22c55e"
 
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
+  // A closed environment for every child of the panel.
+  readonly property var childEnv: ({
+    "PATH": "/usr/bin:/bin",
+    "HOME": Quickshell.env("HOME") || ""
+  })
+
   readonly property string helperPath: pluginDir + "/bin/omagihu"
   readonly property string setupPath: pluginDir + "/bin/omagihu-setup"
 
@@ -352,6 +358,50 @@ Panel {
     openProc.running = true
   }
 
+
+  // A helper that never exits would hold a StdioCollector filling without
+  // bound, so every child gets a budget. Killing the leader alone is not
+  // enough: the negative id reaches anything the helper spawned.
+  readonly property int childBudgetMs: 20000
+
+  Process { id: reaper; clearEnvironment: true; environment: root.childEnv }
+
+  function reap(pid, name) {
+    if (!pid || pid <= 0) return
+    reaper.command = ["/usr/bin/kill", "-TERM", "--", String(pid), "-" + pid]
+    reaper.running = true
+  }
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: true
+    property var budgets: ({})
+    onTriggered: {
+      var procs = [
+        { p: helperProbe, n: "helper probe" },
+        { p: setupProbe, n: "setup probe" },
+        { p: fetchProc, n: "dashboard read" },
+        { p: controlProc, n: "command" },
+        { p: alertProc, n: "alerts read" },
+        { p: catalogueProc, n: "catalogue read" },
+        { p: agentsProc, n: "agents read" },
+        { p: copyProc, n: "clipboard copy" },
+        { p: openProc, n: "url open" }
+      ]
+      for (var i = 0; i < procs.length; i++) {
+        var e = procs[i]
+        if (!e.p.running) { budgets[e.n] = 0; continue }
+        budgets[e.n] = (budgets[e.n] || 0) + interval
+        if (budgets[e.n] >= root.childBudgetMs) {
+          root.reap(e.p.processId, e.n)
+          e.p.running = false
+          budgets[e.n] = 0
+        }
+      }
+    }
+  }
+
   Component.onCompleted: refresh()
   onOpenedChanged: {
     if (opened) refresh()
@@ -385,6 +435,8 @@ Panel {
 
   Process {
     id: helperProbe
+    clearEnvironment: true
+    environment: root.childEnv
     command: ["/usr/bin/test", "-x", root.helperPath]
     onExited: function(code, status) {
       root.helperOk = code === 0
@@ -394,6 +446,8 @@ Panel {
 
   Process {
     id: setupProbe
+    clearEnvironment: true
+    environment: root.childEnv
     command: ["/usr/bin/test", "-x", root.setupPath]
     onExited: function(code, status) {
       root.setupOk = code === 0
@@ -403,6 +457,8 @@ Panel {
 
   Process {
     id: fetchProc
+    clearEnvironment: true
+    environment: root.childEnv
     command: [root.helperPath, "dashboard", "--addr", root.addr]
 
     onExited: function(code, status) {
@@ -437,6 +493,8 @@ Panel {
 
   Process {
     id: controlProc
+    clearEnvironment: true
+    environment: root.childEnv
     property var args: []
     command: [root.helperPath].concat(controlProc.args)
     // Re-read straight away so the chips reflect what the daemon actually did
@@ -465,6 +523,8 @@ Panel {
   // is the only useful thing on screen when a watch will not take.
   Process {
     id: alertProc
+    clearEnvironment: true
+    environment: root.childEnv
     property var args: []
     command: [root.helperPath].concat(alertProc.args)
     onExited: function(code, status) {
@@ -483,6 +543,8 @@ Panel {
 
   Process {
     id: catalogueProc
+    clearEnvironment: true
+    environment: root.childEnv
     command: [root.helperPath, "catalogue", "--addr", root.addr]
     stdout: StdioCollector {
       waitForEnd: true
@@ -497,6 +559,8 @@ Panel {
 
   Process {
     id: agentsProc
+    clearEnvironment: true
+    environment: root.childEnv
     command: [root.helperPath, "agents", "--addr", root.addr]
     stdout: StdioCollector {
       waitForEnd: true
@@ -512,6 +576,8 @@ Panel {
 
   Process {
     id: copyProc
+    clearEnvironment: true
+    environment: root.childEnv
     property string what: "entry"
     command: [root.helperPath, "clip", copyProc.what, "--addr", root.addr]
     onExited: function(code, status) {
@@ -530,6 +596,8 @@ Panel {
 
   Process {
     id: openProc
+    clearEnvironment: true
+    environment: root.childEnv
     property string url: ""
     command: [root.helperPath, "open", openProc.url]
   }
