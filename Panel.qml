@@ -179,6 +179,7 @@ Panel {
   // helper to read it with.
   function refresh() {
     if (!helperProbe.running) helperProbe.running = true
+    if (!setupProbe.running) setupProbe.running = true
     if (!fetchProc.running) fetchProc.running = true
   }
 
@@ -309,14 +310,30 @@ Panel {
   // any key to close", and each press only got as far as Go's cache allowed,
   // which is why it looked like it needed three. execDetached is what the bar
   // itself uses for exactly this, and hands the terminal to the session.
+  // The launcher embeds what it is given in a bash -c string, so anything
+  // interpolated into a command has to be quoted for a shell. Single quotes
+  // with '\'' escaping is the only form with no exceptions.
+  function shellQuote(s) {
+    return "'" + String(s).replace(/'/g, "'\\''") + "'"
+  }
+
+  // Absolute, so the launcher is not resolved through whatever PATH the shell
+  // inherited.
+  readonly property string launcher:
+    "/usr/share/omarchy/bin/omarchy-launch-floating-terminal-with-presentation"
+
   function runSetup(command) {
-    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", command])
+    Quickshell.execDetached([root.launcher, command])
   }
 
   // First run: build the helpers, then install the service. One click instead
   // of a wall of text to retype.
+  //
+  // make -C rather than "cd X && make", so the only separator left is the one
+  // between building and installing, and every path is quoted.
   function runBuildAndInstall() {
-    root.runSetup("cd " + root.pluginDir + " && make && ./bin/omagihu-setup install")
+    root.runSetup("make -C " + root.shellQuote(root.pluginDir) +
+                  " && " + root.shellQuote(root.setupPath) + " install")
   }
 
   function runSetupCommand(sub) {
@@ -326,7 +343,7 @@ Panel {
       root.runBuildAndInstall()
       return
     }
-    root.runSetup("cd " + root.pluginDir + " && ./bin/omagihu-setup " + sub)
+    root.runSetup(root.shellQuote(root.setupPath) + " " + root.shellQuote(sub))
   }
 
   function openUrl(url) {
@@ -355,15 +372,32 @@ Panel {
   // re-clones the folder and deletes bin/ while the daemon keeps running from
   // the file it already opened. The panel then looks healthy and every button
   // that shells out fails with a bare "No such file or directory".
+  // Both helpers, because an interrupted build leaves one without the other and
+  // the panel would otherwise call itself ready while the setup buttons were
+  // still broken. Two probes rather than one shell: no PATH lookup, no string.
+  property bool helperOk: false
+  property bool setupOk: false
+
+  function settleProbes() {
+    root.helperMissing = !(root.helperOk && root.setupOk)
+    if (root.helperMissing) root.snap = null
+  }
+
   Process {
     id: helperProbe
-    // Both helpers, because an interrupted build leaves one without the other
-    // and the panel would otherwise call itself ready while the setup buttons
-    // were still broken.
-    command: ["sh", "-c", "test -x '" + root.helperPath + "' && test -x '" + root.setupPath + "'"]
+    command: ["/usr/bin/test", "-x", root.helperPath]
     onExited: function(code, status) {
-      root.helperMissing = code !== 0
-      if (root.helperMissing) root.snap = null
+      root.helperOk = code === 0
+      root.settleProbes()
+    }
+  }
+
+  Process {
+    id: setupProbe
+    command: ["/usr/bin/test", "-x", root.setupPath]
+    onExited: function(code, status) {
+      root.setupOk = code === 0
+      root.settleProbes()
     }
   }
 
