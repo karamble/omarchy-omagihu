@@ -354,8 +354,16 @@ Panel {
 
   function openUrl(url) {
     if (!url) return
-    openProc.url = url
-    openProc.running = true
+    // Detached, for the same reason the terminal launcher above is. Opening a
+    // link hands focus to the browser, that focus loss closes this card, and a
+    // Process this panel owns is reaped as the card goes: the helper died
+    // before xdg-open was away, so a click did nothing unless the browser
+    // happened to already be running and win the race.
+    //
+    // An argv array goes straight to exec with no shell, so unlike runSetup
+    // there is nothing here to quote. The helper still checks the scheme
+    // before it opens anything.
+    Quickshell.execDetached([root.helperPath, "open", String(url)])
   }
 
 
@@ -386,8 +394,7 @@ Panel {
         { p: alertProc, n: "alerts read" },
         { p: catalogueProc, n: "catalogue read" },
         { p: agentsProc, n: "agents read" },
-        { p: copyProc, n: "clipboard copy" },
-        { p: openProc, n: "url open" }
+        { p: copyProc, n: "clipboard copy" }
       ]
       for (var i = 0; i < procs.length; i++) {
         var e = procs[i]
@@ -592,14 +599,6 @@ Panel {
     id: copiedReset
     interval: 2500
     onTriggered: root.copied = ""
-  }
-
-  Process {
-    id: openProc
-    clearEnvironment: true
-    environment: root.childEnv
-    property string url: ""
-    command: [root.helperPath, "open", openProc.url]
   }
 
   BarIconButton {
