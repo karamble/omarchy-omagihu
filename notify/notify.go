@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/karamble/omarchy-omagihu/attention"
@@ -265,14 +266,32 @@ func (n *Notifier) isNew(key string) bool {
 // the same call site rather than opening a second one.
 func Desktop(urgency, title, body string) error { return sendDesktop(urgency, title, body) }
 
+// bodyMarkup escapes the three characters that can open markup in a
+// notification body. The shell renders bodies as styled text, so a pull
+// request title is free to carry a tag unless it is neutralised here.
+// Replacing in one pass means the & of an &lt; just written is not escaped
+// again. Newlines are left alone: the renderer makes its own line breaks.
+var bodyMarkup = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// desktopArgs builds the notify-send command line. The body is escaped, the
+// summary is not: the spec makes the summary plain text, so escaping it would
+// show the entities. The -- stops a title that begins with a dash being read
+// as a flag.
+func desktopArgs(urgency, title, body string) []string {
+	return []string{
+		"--app-name=omagihu",
+		"--urgency=" + urgency,
+		"--expire-time=" + strconv.Itoa(10000),
+		"--",
+		title,
+		bodyMarkup.Replace(body),
+	}
+}
+
 // sendDesktop hands one notification to the desktop. A missing notify-send is
 // reported once by the caller and never fatal.
 func sendDesktop(urgency, title, body string) error {
-	cmd := exec.Command("notify-send",
-		"--app-name=omagihu",
-		"--urgency="+urgency,
-		"--expire-time="+strconv.Itoa(10000),
-		title, body)
+	cmd := exec.Command("notify-send", desktopArgs(urgency, title, body)...)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("notify-send: %w", err)
 	}

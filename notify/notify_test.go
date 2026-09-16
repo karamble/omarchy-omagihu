@@ -3,6 +3,7 @@ package notify
 import (
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/karamble/omarchy-omagihu/forge"
@@ -210,5 +211,142 @@ func TestPrefsSetAndEnabled(t *testing.T) {
 		if !p.Enabled(d) {
 			t.Errorf("Set(%s, true) did not take", d)
 		}
+	}
+}
+
+// bodyArg returns the notification body from a notify-send command line, which
+// is the last argument.
+func bodyArg(args []string) string { return args[len(args)-1] }
+
+// TestDesktopArgsEscapesBody is the guard against rich-text injection. The
+// shell renders notification bodies as styled text, so a pull request title
+// carrying a tag would render as markup inside trusted notification chrome.
+// Escaping < closes every tag by construction, whatever the tag is called.
+func TestDesktopArgsEscapesBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "a script tag",
+			body: "<script>alert(1)</script>",
+			want: "&lt;script&gt;alert(1)&lt;/script&gt;",
+		},
+		{
+			name: "a link that would render live",
+			body: `<a href="http://evil.invalid">click</a>`,
+			want: `&lt;a href="http://evil.invalid"&gt;click&lt;/a&gt;`,
+		},
+		{
+			name: "markup spoofing the chrome",
+			body: "<b>urgent</b>",
+			want: "&lt;b&gt;urgent&lt;/b&gt;",
+		},
+		{
+			name: "a remote image beacon",
+			body: "<img src=x>",
+			want: "&lt;img src=x&gt;",
+		},
+		{
+			name: "a bare ampersand",
+			body: "a & b",
+			want: "a &amp; b",
+		},
+		{
+			name: "an entity typed by hand is escaped once, not twice",
+			body: "&lt;b&gt;",
+			want: "&amp;lt;b&amp;gt;",
+		},
+		{
+			name: "an apostrophe is left alone so titles read normally",
+			body: "Fix Bob's crash",
+			want: "Fix Bob's crash",
+		},
+		{
+			name: "a quote is left alone too",
+			body: `the "fast" path`,
+			want: `the "fast" path`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bodyArg(desktopArgs("normal", "a title", tc.body))
+			if got != tc.want {
+				t.Fatalf("body escaped to %q, want %q", got, tc.want)
+			}
+			if strings.ContainsAny(got, "<>") {
+				t.Fatalf("body %q still carries a bare angle bracket, so a tag can still form", got)
+			}
+		})
+	}
+}
+
+// TestDesktopArgsKeepsNewlines pins that escaping did not cost the line break
+// between the repository line and the title: the renderer makes its own.
+func TestDesktopArgsKeepsNewlines(t *testing.T) {
+	got := bodyArg(desktopArgs("normal", "a title", "o/r #1\n<b>a change</b>"))
+	want := "o/r #1\n&lt;b&gt;a change&lt;/b&gt;"
+	if got != want {
+		t.Fatalf("body is %q, want %q", got, want)
+	}
+}
+
+// TestDesktopArgsLeavesSummaryPlain pins the asymmetry. The spec defines the
+// summary as plain text and the shell renders it that way, so escaping it
+// would show the entities to the reader instead of the characters.
+func TestDesktopArgsLeavesSummaryPlain(t *testing.T) {
+	args := desktopArgs("normal", "Ben & Jerry <team>", "a body")
+	for _, a := range args {
+		if a == "Ben & Jerry <team>" {
+			return
+		}
+	}
+	t.Fatalf("summary was altered on its way to notify-send: %q", args)
+}
+
+// TestDesktopArgsTerminatesFlags is the guard against argument injection. An
+// inbox notification puts its title in the body unprefixed, so without the
+// terminator a title beginning with a dash is read as a flag.
+func TestDesktopArgsTerminatesFlags(t *testing.T) {
+	args := desktopArgs("normal", "--help", "-t 1")
+
+	end := -1
+	for i, a := range args {
+		if a == "--" {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		t.Fatalf("no -- terminator in %q: a title beginning with a dash is parsed as a flag", args)
+	}
+	if got := args[end+1:]; len(got) != 2 || got[0] != "--help" || got[1] != "-t 1" {
+		t.Fatalf("after -- the arguments are %q, want the summary then the body", got)
+	}
+}
+
+// TestHostileTitleIsStillOneEvent checks that escaping changed how a title is
+// rendered and not what counts as news.
+func TestHostileTitleIsStillOneEvent(t *testing.T) {
+	n, remote, _, out := harness(t, Defaults())
+	remote.snap = withReview("https://example/1")
+	n.check() // prime
+
+	remote.snap = &poll.Snapshot{Accounts: []poll.AccountView{{
+		AccountID: "a",
+		ReviewRequests: []forge.PullRequest{{
+			Repo: "o/r", Number: 2, URL: "https://example/2",
+			Title: "<b>x</b>",
+		}},
+	}}}
+	n.check()
+
+	if len(*out) != 1 {
+		t.Fatalf("a hostile title produced %d notifications, want 1", len(*out))
+	}
+	if !strings.Contains((*out)[0].body, "<b>x</b>") {
+		t.Fatalf("the notifier changed the body before the sender saw it: %q", (*out)[0].body)
 	}
 }

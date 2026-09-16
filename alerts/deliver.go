@@ -106,9 +106,13 @@ func NewDeliverer(desktop Notifier) Deliverer {
 
 // Alarm is the wake-up text. It names the trigger, the condition and the
 // reason, and carries no values: whoever is woken reads omagihu themselves.
+//
+// The summary is quoted, like the reason below it. It is built from branch and
+// directory names, and this text is handed to an agent as a prompt, so the
+// untrusted span is delimited rather than left to read as a sentence.
 func Alarm(t Trigger, f Fire) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "omagihu alarm %s: %s", t.ID, f.Summary)
+	fmt.Fprintf(&b, "omagihu alarm %s: %q", t.ID, f.Summary)
 	fmt.Fprintf(&b, " at %s.", f.At.UTC().Format(time.RFC3339))
 	if t.Reason != "" {
 		fmt.Fprintf(&b, ` Reason: %q.`, t.Reason)
