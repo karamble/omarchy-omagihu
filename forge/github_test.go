@@ -322,3 +322,186 @@ func TestWaitingOnOwner(t *testing.T) {
 		})
 	}
 }
+
+func TestInboxPagination(t *testing.T) {
+	const lastModified = "Tue, 09 Sep 2026 10:00:00 GMT"
+
+	// page returns a JSON array of n notifications whose ids run 0..n-1.
+	page := func(n int) string {
+		var out strings.Builder
+		out.WriteByte('[')
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			out.WriteString(`{"id":"` + strconv.Itoa(i) + `","reason":"author","unread":true,`)
+			out.WriteString(`"updated_at":"2026-09-08T15:43:11Z","repository":{"full_name":"o/r"},`)
+			out.WriteString(`"subject":{"title":"n` + strconv.Itoa(i) + `","type":"Issue",`)
+			out.WriteString(`"url":"https://api.github.com/repos/o/r/issues/1"}}`)
+		}
+		out.WriteByte(']')
+		return out.String()
+	}
+
+	var page2Calls int
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("page") == "2" {
+			page2Calls++
+			w.Write([]byte(page(12))) // page two: 12 notifications
+			return
+		}
+		// page one (no page param): 50, with a rel="next" link.
+		w.Header().Set("Link",
+			`<`+srv.URL+`/notifications?all=false&per_page=50&page=2>; rel="next", `+
+				`<`+srv.URL+`/notifications?page=1>; rel="first"`)
+		w.Header().Set("Last-Modified", lastModified)
+		w.Write([]byte(page(50)))
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv)
+	items, state, _, _, err := c.inboxAt(t.Context(), srv.URL, InboxState{})
+	if err != nil {
+		t.Fatalf("inboxAt: %v", err)
+	}
+	if len(items) != 62 {
+		t.Fatalf("len(items) = %d, want 62 (50 + 12)", len(items))
+	}
+	if page2Calls != 1 {
+		t.Errorf("page 2 fetched %d times, want 1", page2Calls)
+	}
+	if state.LastModified != lastModified {
+		t.Errorf("LastModified = %q, want %q", state.LastModified, lastModified)
+	}
+}
+
+func TestInboxPagination304OnPoll(t *testing.T) {
+	const lastModified = "Tue, 09 Sep 2026 10:00:00 GMT"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("If-Modified-Since") == lastModified {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Last-Modified", lastModified)
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv)
+
+	// First poll: fetch, capture Last-Modified.
+	items, state, unchanged, _, err := c.inboxAt(t.Context(), srv.URL, InboxState{})
+	if err != nil {
+		t.Fatalf("first inboxAt: %v", err)
+	}
+	if unchanged {
+		t.Error("first poll reported unchanged, want a real fetch")
+	}
+	if len(items) != 0 {
+		t.Fatalf("first poll items = %d, want empty list", len(items))
+	}
+
+	// Second poll sends the validator and gets 304.
+	items, state, unchanged, _, err = c.inboxAt(t.Context(), srv.URL, state)
+	if err != nil {
+		t.Fatalf("second inboxAt: %v", err)
+	}
+	if !unchanged {
+		t.Error("second poll reported changed, want unchanged from 304")
+	}
+	if items != nil {
+		t.Errorf("second poll items = %+v, want nil so the caller keeps the previous list", items)
+	}
+	if state.LastModified != lastModified {
+		t.Errorf("LastModified after 304 = %q, want preserved", state.LastModified)
+	}
+}
+
+func TestInboxLoopingLinkStops(t *testing.T) {
+	calls := 0
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		// Always point "next" back at page 1.
+		w.Header().Set("Link", `<`+srv.URL+`/notifications?page=1>; rel="next"`)
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv)
+	items, _, _, _, err := c.inboxAt(t.Context(), srv.URL, InboxState{})
+	if err != nil {
+		t.Fatalf("inboxAt: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items = %+v, want empty", items)
+	}
+	if calls > maxPages {
+		t.Errorf("server received %d requests, want at most %d (link loop bounded)", calls, maxPages)
+	}
+}
+
+func TestInboxStatusMapping(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		class  string
+	}{
+		{http.StatusUnauthorized, "unauthorized"},
+		{http.StatusForbidden, "recoverable"},
+		{http.StatusTooManyRequests, "recoverable"},
+	} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			c := testClient(t, srv)
+			_, _, _, _, err := c.inboxAt(t.Context(), srv.URL, InboxState{})
+			if tc.class == "unauthorized" {
+				if !errors.Is(err, ErrUnauthorized) {
+					t.Fatalf("401 error = %v, want ErrUnauthorized", err)
+				}
+				return
+			}
+			if errors.Is(err, ErrUnauthorized) {
+				t.Fatalf("%d must not be ErrUnauthorized, got %v", tc.status, err)
+			}
+			if err == nil {
+				t.Fatalf("%d should surface an error so the poller backs off, got nil", tc.status)
+			}
+		})
+	}
+}
+
+func TestWorkStatusMapping(t *testing.T) {
+	t.Run("unauthorized", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+		c := testClient(t, srv)
+		_, _, err := c.workAt(t.Context(), srv.URL)
+		if !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("Work 401 error = %v, want ErrUnauthorized", err)
+		}
+	})
+	t.Run("forbidden_is_recoverable", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer srv.Close()
+		c := testClient(t, srv)
+		_, _, err := c.workAt(t.Context(), srv.URL)
+		if errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("Work 403 must not be ErrUnauthorized, got %v", err)
+		}
+		if err == nil {
+			t.Fatal("Work 403 should surface an error, got nil")
+		}
+	})
+}

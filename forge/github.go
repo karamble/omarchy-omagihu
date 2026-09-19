@@ -96,44 +96,89 @@ func (c *Client) Inbox(ctx context.Context, state InboxState) (items []Notificat
 	return c.inboxAt(ctx, c.account.APIBase(), state)
 }
 
+// maxPages caps how many notification pages one Inbox poll follows, so a broken
+// endpoint that points at itself cannot make a poll loop forever. 50 per page
+// means a full sweep is 5000 notifications, far beyond what any panel shows.
+const maxPages = 100
+
 // inboxAt is Inbox against an explicit API root, so tests can point it at a stub.
+// It aggregates every page GitHub returns rather than trusting page one: the
+// notifications list is paginated and a busy account can outgrow page one.
 func (c *Client) inboxAt(ctx context.Context, base string, state InboxState) (items []Notification, next InboxState, unchanged bool, rate Rate, err error) {
-	req, err := c.newRequest(ctx, http.MethodGet, base+"/notifications?all=false", nil)
-	if err != nil {
-		return nil, state, false, Rate{}, err
-	}
-	if state.LastModified != "" {
-		req.Header.Set("If-Modified-Since", state.LastModified)
-	}
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, state, false, Rate{}, fmt.Errorf("fetching notifications: %w", err)
-	}
-	defer resp.Body.Close()
-
 	next = state
-	if v := resp.Header.Get("X-Poll-Interval"); v != "" {
-		if secs, convErr := strconv.Atoi(v); convErr == nil && secs > 0 {
-			next.PollInterval = time.Duration(secs) * time.Second
+	url := base + "/notifications?all=false&per_page=50"
+
+	for page := 0; page < maxPages; page++ {
+		req, reqErr := c.newRequest(ctx, http.MethodGet, url, nil)
+		if reqErr != nil {
+			return nil, state, false, Rate{}, reqErr
+		}
+		// Only the first request of a poll carries the conditional validator: it
+		// covers the list as a whole. Page 2+ are already known-stale (page 1
+		// answered 200), so sending the validator again would risk a confusing
+		// per-page 304.
+		if page == 0 && state.LastModified != "" {
+			req.Header.Set("If-Modified-Since", state.LastModified)
+		}
+
+		resp, doErr := c.http.Do(req)
+		if doErr != nil {
+			return nil, state, false, Rate{}, fmt.Errorf("fetching notifications: %w", doErr)
+		}
+
+		if v := resp.Header.Get("X-Poll-Interval"); v != "" {
+			if secs, convErr := strconv.Atoi(v); convErr == nil && secs > 0 {
+				next.PollInterval = time.Duration(secs) * time.Second
+			}
+		}
+		rate = readRate(resp.Header)
+
+		switch resp.StatusCode {
+		case http.StatusNotModified:
+			// The conditional validator covers the list as a whole, so a 304 on
+			// the first request means nothing changed: keep the existing list.
+			resp.Body.Close()
+			return nil, next, true, rate, nil
+		case http.StatusOK:
+		case http.StatusUnauthorized:
+			// A token GitHub genuinely rejects is a permanent condition: the
+			// poller stops the account rather than wasting its backoff.
+			resp.Body.Close()
+			return nil, state, false, rate, fmt.Errorf("notifications: %w (%s)", ErrUnauthorized, resp.Status)
+		default:
+			// 403 and 429 are rate limiting (403 when the quota budget is gone,
+			// 429 the dedicated status): recoverable, so the caller's existing
+			// backoff applies and the loop stays alive. Never ErrUnauthorized.
+			resp.Body.Close()
+			return nil, state, false, rate, fmt.Errorf("notifications returned %s", resp.Status)
+		}
+
+		// Last-Modified is a property of the whole list, taken from the first
+		// (validated) request; page 2+ must not clobber it.
+		if page == 0 {
+			if v := resp.Header.Get("Last-Modified"); v != "" {
+				next.LastModified = v
+			}
+		}
+
+		pageItems, decErr := decodeNotifications(resp.Body, c.account.ID)
+		resp.Body.Close()
+		if decErr != nil {
+			return nil, state, false, rate, fmt.Errorf("decoding notifications: %w", decErr)
+		}
+		items = append(items, pageItems...)
+
+		url = nextLink(resp.Header.Get("Link"))
+		if url == "" || page+1 >= maxPages {
+			return items, next, false, rate, nil
 		}
 	}
-	rate = readRate(resp.Header)
+	return items, next, false, rate, nil
+}
 
-	switch resp.StatusCode {
-	case http.StatusNotModified:
-		return nil, next, true, rate, nil
-	case http.StatusOK:
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, next, false, rate, fmt.Errorf("notifications: %w (%s)", ErrUnauthorized, resp.Status)
-	default:
-		return nil, next, false, rate, fmt.Errorf("notifications returned %s", resp.Status)
-	}
-
-	if v := resp.Header.Get("Last-Modified"); v != "" {
-		next.LastModified = v
-	}
-
+// decodeNotifications parses one page of the notifications endpoint into
+// Notification values owned by the given account.
+func decodeNotifications(body io.Reader, accountID string) ([]Notification, error) {
 	var raw []struct {
 		ID         string    `json:"id"`
 		Reason     string    `json:"reason"`
@@ -148,14 +193,13 @@ func (c *Client) inboxAt(ctx context.Context, base string, state InboxState) (it
 			URL   string `json:"url"`
 		} `json:"subject"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&raw); err != nil {
-		return nil, next, false, rate, fmt.Errorf("decoding notifications: %w", err)
+	if err := json.NewDecoder(io.LimitReader(body, maxBody)).Decode(&raw); err != nil {
+		return nil, err
 	}
-
-	items = make([]Notification, 0, len(raw))
+	items := make([]Notification, 0, len(raw))
 	for _, n := range raw {
 		items = append(items, Notification{
-			AccountID:  c.account.ID,
+			AccountID:  accountID,
 			ID:         n.ID,
 			Repo:       n.Repository.FullName,
 			Type:       n.Subject.Type,
@@ -167,7 +211,22 @@ func (c *Client) inboxAt(ctx context.Context, base string, state InboxState) (it
 			WebURL:     webURL(n.Subject.URL),
 		})
 	}
-	return items, next, false, rate, nil
+	return items, nil
+}
+
+// nextLink returns the URL GitHub points us at for the next page (the
+// rel="next" entry of the Link header), or "" on the last page.
+func nextLink(header string) string {
+	for _, part := range strings.Split(header, ",") {
+		link, params, found := strings.Cut(part, ";")
+		if !found {
+			continue
+		}
+		if strings.Contains(params, `rel="next"`) || strings.Contains(params, "rel=next") {
+			return strings.Trim(strings.TrimSpace(link), "<> ")
+		}
+	}
+	return ""
 }
 
 // PullRequest is one of the account's own PRs or one awaiting its review.
@@ -316,9 +375,11 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 	rate := readRate(resp.Header)
 	switch resp.StatusCode {
 	case http.StatusOK:
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
 		return Workload{}, rate, fmt.Errorf("workload: %w (%s)", ErrUnauthorized, resp.Status)
 	default:
+		// 403 (rate limit exhausted) and 429 are recoverable: back off, do not
+		// treat them as an invalid token that stops the account.
 		return Workload{}, rate, fmt.Errorf("workload query returned %s", resp.Status)
 	}
 
