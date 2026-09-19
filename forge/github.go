@@ -234,6 +234,9 @@ query {
   reviewing: search(query: "is:open is:pr review-requested:@me archived:false", type: ISSUE, first: 50) {
     nodes { ...prFields }
   }
+  incoming: search(query: "is:open is:pr user:@me -author:@me archived:false", type: ISSUE, first: 50) {
+    nodes { ...prFields }
+  }
   merged: search(query: "is:merged is:pr author:@me", type: ISSUE, first: 30) {
     nodes { ...prFields }
   }
@@ -326,6 +329,7 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 			} `json:"viewer"`
 			Authored       struct{ Nodes []gqlPR }    `json:"authored"`
 			Reviewing      struct{ Nodes []gqlPR }    `json:"reviewing"`
+			Incoming       struct{ Nodes []gqlPR }    `json:"incoming"`
 			Merged         struct{ Nodes []gqlPR }    `json:"merged"`
 			Assigned       struct{ Nodes []gqlIssue } `json:"assigned"`
 			AuthoredIssues struct{ Nodes []gqlIssue } `json:"authoredIssues"`
@@ -345,8 +349,27 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 	for _, n := range out.Data.Authored.Nodes {
 		work.AuthoredPRs = append(work.AuthoredPRs, c.toPR(n))
 	}
+	seen := make(map[string]struct{})
 	for _, n := range out.Data.Reviewing.Nodes {
-		work.ReviewRequests = append(work.ReviewRequests, c.toPR(n))
+		pr := c.toPR(n)
+		seen[pr.URL] = struct{}{}
+		work.ReviewRequests = append(work.ReviewRequests, pr)
+	}
+	// Somebody else's pull request on a repository you own. GitHub will never
+	// put these in review-requested: setting a reviewer needs write access, so
+	// an outside contributor cannot ask, and without a CODEOWNERS file nobody
+	// asks on their behalf. For a solo maintainer that is the whole of the
+	// inbound work, and it was invisible.
+	for _, n := range out.Data.Incoming.Nodes {
+		pr := c.toPR(n)
+		if _, already := seen[pr.URL]; already {
+			continue
+		}
+		if !waitingOnOwner(pr) {
+			continue
+		}
+		seen[pr.URL] = struct{}{}
+		work.ReviewRequests = append(work.ReviewRequests, pr)
 	}
 	for _, n := range out.Data.Merged.Nodes {
 		work.MergedPRs = append(work.MergedPRs, c.toPR(n))
@@ -386,6 +409,22 @@ func (c *Client) toIssue(n gqlIssue) Issue {
 		Labels:    n.Labels.Nodes,
 		UpdatedAt: n.UpdatedAt,
 	}
+}
+
+// waitingOnOwner reports whether an incoming pull request still needs the
+// maintainer. A draft says the contributor is not finished, and a review that
+// has already been given puts the ball back in their court; neither should
+// hold the badge open. A pull request nobody has reviewed carries no decision
+// at all, which is the case this exists for.
+func waitingOnOwner(pr PullRequest) bool {
+	if pr.IsDraft {
+		return false
+	}
+	switch pr.ReviewDecision {
+	case "APPROVED", "CHANGES_REQUESTED":
+		return false
+	}
+	return true
 }
 
 func (c *Client) toPR(n gqlPR) PullRequest {

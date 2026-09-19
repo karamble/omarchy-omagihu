@@ -241,3 +241,84 @@ func TestWorkSurfacesGraphQLErrors(t *testing.T) {
 		t.Errorf("error = %q, want it to carry the GraphQL message", got)
 	}
 }
+
+// TestWorkSurfacesIncomingPullRequests covers the case the workload query used
+// to miss entirely: somebody else's pull request on a repository you own.
+// GitHub cannot report those as review-requested, because requesting a
+// reviewer needs write access the contributor does not have, so a maintainer
+// saw nothing until they went looking.
+func TestWorkSurfacesIncomingPullRequests(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":{
+			"viewer":{"login":"tester"},
+			"authored":{"nodes":[]},
+			"reviewing":{"nodes":[{
+				"number":1,"title":"asked for","url":"https://github.com/o/r/pull/1",
+				"updatedAt":"2026-09-06T00:00:00Z","author":{"login":"colleague"},
+				"repository":{"nameWithOwner":"o/r"}
+			}]},
+			"incoming":{"nodes":[
+			  {"number":1,"title":"asked for","url":"https://github.com/o/r/pull/1",
+			   "updatedAt":"2026-09-06T00:00:00Z","author":{"login":"colleague"},
+			   "repository":{"nameWithOwner":"o/r"}},
+			  {"number":2,"title":"unreviewed","url":"https://github.com/o/r/pull/2",
+			   "updatedAt":"2026-09-07T00:00:00Z","author":{"login":"stranger"},
+			   "repository":{"nameWithOwner":"o/r"}},
+			  {"number":3,"title":"still a draft","url":"https://github.com/o/r/pull/3",
+			   "isDraft":true,"updatedAt":"2026-09-07T00:00:00Z","author":{"login":"stranger"},
+			   "repository":{"nameWithOwner":"o/r"}},
+			  {"number":4,"title":"already approved","url":"https://github.com/o/r/pull/4",
+			   "reviewDecision":"APPROVED","updatedAt":"2026-09-07T00:00:00Z",
+			   "author":{"login":"stranger"},"repository":{"nameWithOwner":"o/r"}},
+			  {"number":5,"title":"changes asked for","url":"https://github.com/o/r/pull/5",
+			   "reviewDecision":"CHANGES_REQUESTED","updatedAt":"2026-09-07T00:00:00Z",
+			   "author":{"login":"stranger"},"repository":{"nameWithOwner":"o/r"}}
+			]},
+			"assigned":{"nodes":[]}
+		}}`))
+	}))
+	defer srv.Close()
+
+	work, _, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+	if err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+
+	var got []int
+	for _, pr := range work.ReviewRequests {
+		got = append(got, pr.Number)
+	}
+	// 1 appears in both lists and must be listed once. 3 is the contributor's
+	// own "not finished". 4 and 5 have been answered and are waiting on them.
+	want := []int{1, 2}
+	if len(got) != len(want) {
+		t.Fatalf("ReviewRequests = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ReviewRequests = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestWaitingOnOwner(t *testing.T) {
+	cases := []struct {
+		name string
+		pr   PullRequest
+		want bool
+	}{
+		{"nobody has looked at it", PullRequest{}, true},
+		{"the contributor is still working", PullRequest{IsDraft: true}, false},
+		{"already approved", PullRequest{ReviewDecision: "APPROVED"}, false},
+		{"changes are with the author", PullRequest{ReviewDecision: "CHANGES_REQUESTED"}, false},
+		{"review required but not given", PullRequest{ReviewDecision: "REVIEW_REQUIRED"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := waitingOnOwner(tc.pr); got != tc.want {
+				t.Errorf("waitingOnOwner = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
