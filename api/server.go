@@ -741,6 +741,7 @@ func (s *Server) NotifyPrefs() notify.Prefs {
 	d := notify.Defaults()
 	return notify.Prefs{
 		Reviews:   s.store.NotifyOrDefault("reviews", d.Reviews),
+		Incoming:  s.store.NotifyOrDefault("incoming", d.Incoming),
 		Broken:    s.store.NotifyOrDefault("broken", d.Broken),
 		Inbox:     s.store.NotifyOrDefault("inbox", d.Inbox),
 		Local:     s.store.NotifyOrDefault("local", d.Local),
@@ -756,7 +757,7 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || body.Enabled == nil {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
-			"error": `body must be {"domain":"reviews|broken|inbox|local","enabled":true|false}`,
+			"error": `body must be {"domain":"reviews|incoming|broken|inbox|local|reconcile","enabled":true|false}`,
 		})
 		return
 	}

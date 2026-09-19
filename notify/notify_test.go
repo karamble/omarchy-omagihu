@@ -350,3 +350,65 @@ func TestHostileTitleIsStillOneEvent(t *testing.T) {
 		t.Fatalf("the notifier changed the body before the sender saw it: %q", (*out)[0].body)
 	}
 }
+
+// withIncoming is a pull request somebody else opened on a repository the
+// account owns. It shares a list with review requests because both wait on the
+// same person, and the flag is what keeps them apart.
+func withIncoming(url string) *poll.Snapshot {
+	return &poll.Snapshot{Accounts: []poll.AccountView{{
+		AccountID: "a",
+		ReviewRequests: []forge.PullRequest{{
+			Repo: "o/r", Number: 2, URL: url, Title: "a contribution", Incoming: true,
+		}},
+	}}}
+}
+
+// TestIncomingIsNotCalledAReviewRequest pins the wording. GitHub cannot put an
+// outside contribution in review-requested, because naming a reviewer needs
+// write access the contributor does not have. Announcing one as a review
+// request states the opposite of what happened.
+func TestIncomingIsNotCalledAReviewRequest(t *testing.T) {
+	n, remote, _, out := harness(t, Defaults())
+	remote.snap = withIncoming("https://example/2")
+	n.check() // prime
+	remote.snap = withIncoming("https://example/3")
+	n.check()
+
+	if len(*out) != 1 {
+		t.Fatalf("sent %d notifications, want 1", len(*out))
+	}
+	if got := (*out)[0].title; got == "Review requested" {
+		t.Errorf("an unrequested pull request was announced as %q", got)
+	}
+	if !strings.Contains((*out)[0].title, "your repository") {
+		t.Errorf("title = %q, want it to say the repository is yours", (*out)[0].title)
+	}
+}
+
+// TestIncomingHasItsOwnSwitch is the point of the separate domain: a drive-by
+// pull request can be silenced without silencing a review somebody asked for,
+// and the other way round.
+func TestIncomingHasItsOwnSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		prefs Prefs
+		snap  func(string) *poll.Snapshot
+		want  int
+	}{
+		{"incoming off, a request still speaks", Prefs{Reviews: true, Incoming: false}, withReview, 1},
+		{"incoming off silences an arrival", Prefs{Reviews: true, Incoming: false}, withIncoming, 0},
+		{"reviews off, an arrival still speaks", Prefs{Reviews: false, Incoming: true}, withIncoming, 1},
+		{"reviews off silences a request", Prefs{Reviews: false, Incoming: true}, withReview, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, remote, _, out := harness(t, tc.prefs)
+			remote.snap = tc.snap("https://example/first")
+			n.check() // prime
+			remote.snap = tc.snap("https://example/second")
+			n.check()
+			if len(*out) != tc.want {
+				t.Fatalf("sent %d notifications, want %d", len(*out), tc.want)
+			}
+		})
+	}
+}

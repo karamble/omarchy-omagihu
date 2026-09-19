@@ -253,7 +253,8 @@ Column {
         fontFamily: view.fontFamily
         title: view.shortRepo(modelData.repo) + " #" + modelData.number + "  " + modelData.title
         subtitle: "by " + modelData.author + " • " + view.ago(modelData.updatedAt)
-        badges: [{ text: "REVIEW", tone: Color.urgent, loud: true }]
+        // Both wait on the same person, but only one of them was asked for.
+        badges: [{ text: modelData.incoming ? "ON YOURS" : "REVIEW", tone: Color.urgent, loud: true }]
         onActivated: view.owner.openUrl(modelData.url)
       }
     }

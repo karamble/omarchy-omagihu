@@ -288,6 +288,11 @@ type PullRequest struct {
 	ReviewDecision string    `json:"reviewDecision,omitempty"`
 	ChecksState    string    `json:"checksState,omitempty"`
 	UpdatedAt      time.Time `json:"updatedAt,omitzero"`
+	// Incoming marks a pull request somebody else opened on a repository the
+	// account owns, as opposed to one whose review was actually requested.
+	// Both wait on the same person, so they share a list, but only one of them
+	// is a request and saying otherwise in a notification is a small lie.
+	Incoming bool `json:"incoming,omitempty"`
 }
 
 // Label is one label on an issue. The colour is GitHub's own six-character hex
@@ -472,6 +477,7 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 		if !waitingOnOwner(pr) {
 			continue
 		}
+		pr.Incoming = true
 		seen[pr.URL] = struct{}{}
 		work.ReviewRequests = append(work.ReviewRequests, pr)
 	}

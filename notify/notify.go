@@ -29,6 +29,11 @@ type Domain string
 const (
 	// DomainReviews: somebody is blocked waiting on you.
 	DomainReviews Domain = "reviews"
+	// DomainIncoming: somebody opened a pull request on a repository you own.
+	// Separate from reviews because nobody asked: GitHub cannot put an outside
+	// contribution in review-requested, so it is not a request and a
+	// notification calling it one would be wrong.
+	DomainIncoming Domain = "incoming"
 	// DomainBroken: your own pull request failed or was sent back.
 	DomainBroken Domain = "broken"
 	// DomainInbox: any unread notification.
@@ -43,6 +48,7 @@ const (
 // "somebody is waiting" through, and keep the rest quiet.
 type Prefs struct {
 	Reviews   bool `json:"reviews"`
+	Incoming  bool `json:"incoming"`
 	Broken    bool `json:"broken"`
 	Inbox     bool `json:"inbox"`
 	Local     bool `json:"local"`
@@ -51,7 +57,7 @@ type Prefs struct {
 
 // Defaults returns the out-of-the-box preferences.
 func Defaults() Prefs {
-	return Prefs{Reviews: true, Broken: true, Inbox: false, Local: false, Reconcile: false}
+	return Prefs{Reviews: true, Incoming: true, Broken: true, Inbox: false, Local: false, Reconcile: false}
 }
 
 // Enabled reports whether one domain may speak.
@@ -59,6 +65,8 @@ func (p Prefs) Enabled(d Domain) bool {
 	switch d {
 	case DomainReviews:
 		return p.Reviews
+	case DomainIncoming:
+		return p.Incoming
 	case DomainBroken:
 		return p.Broken
 	case DomainInbox:
@@ -76,6 +84,8 @@ func (p Prefs) Set(d Domain, on bool) Prefs {
 	switch d {
 	case DomainReviews:
 		p.Reviews = on
+	case DomainIncoming:
+		p.Incoming = on
 	case DomainBroken:
 		p.Broken = on
 	case DomainInbox:
@@ -91,7 +101,7 @@ func (p Prefs) Set(d Domain, on bool) Prefs {
 // ParseDomain maps a name to a Domain.
 func ParseDomain(name string) (Domain, bool) {
 	switch Domain(name) {
-	case DomainReviews, DomainBroken, DomainInbox, DomainLocal, DomainReconcile:
+	case DomainReviews, DomainIncoming, DomainBroken, DomainInbox, DomainLocal, DomainReconcile:
 		return Domain(name), true
 	}
 	return "", false
@@ -171,9 +181,16 @@ func (n *Notifier) check() {
 		for _, pr := range acct.ReviewRequests {
 			key := "review:" + pr.URL
 			fresh[key] = struct{}{}
-			if n.isNew(key) && prefs.Enabled(DomainReviews) {
+			domain, summary := DomainReviews, "Review requested"
+			if pr.Incoming {
+				// Nobody asked for this one; it simply arrived on a repository
+				// the account owns. Saying "review requested" would describe
+				// the opposite of what happened.
+				domain, summary = DomainIncoming, "New pull request on your repository"
+			}
+			if n.isNew(key) && prefs.Enabled(domain) {
 				events = append(events, event{"critical",
-					"Review requested",
+					summary,
 					fmt.Sprintf("%s #%d\n%s", pr.Repo, pr.Number, pr.Title)})
 			}
 		}

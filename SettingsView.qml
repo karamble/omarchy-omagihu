@@ -40,7 +40,9 @@ Column {
   ]
   readonly property var notifyDomains: [
     { key: "reviews", label: "A review is requested of you",
-      hint: "Somebody is blocked waiting on you." },
+      hint: "Somebody named you as a reviewer and is blocked waiting." },
+    { key: "incoming", label: "Somebody opens a pull request on your repository",
+      hint: "Nobody asks: an outside contributor cannot name a reviewer, so these arrive unannounced." },
     { key: "broken", label: "Your pull request fails or is sent back",
       hint: "Checks went red, or a reviewer asked for changes." },
     { key: "inbox", label: "Any unread notification",

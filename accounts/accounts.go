@@ -124,6 +124,7 @@ func (s *Store) SetMonitoring(enabled bool) {
 // distinguishable from "set to false".
 type NotifyPrefs struct {
 	Reviews   *bool `json:"reviews,omitempty"`
+	Incoming  *bool `json:"incoming,omitempty"`
 	Broken    *bool `json:"broken,omitempty"`
 	Inbox     *bool `json:"inbox,omitempty"`
 	Local     *bool `json:"local,omitempty"`
@@ -141,6 +142,8 @@ func (s *Store) NotifyOrDefault(domain string, fallback bool) bool {
 	switch domain {
 	case "reviews":
 		v = s.Notify.Reviews
+	case "incoming":
+		v = s.Notify.Incoming
 	case "broken":
 		v = s.Notify.Broken
 	case "inbox":
@@ -166,6 +169,8 @@ func (s *Store) SetNotify(domain string, enabled bool) {
 	switch domain {
 	case "reviews":
 		s.Notify.Reviews = &enabled
+	case "incoming":
+		s.Notify.Incoming = &enabled
 	case "broken":
 		s.Notify.Broken = &enabled
 	case "inbox":
