@@ -218,7 +218,7 @@ func (s *Server) health(snap *poll.Snapshot, repos *local.Snapshot) healthRespon
 		Status:       "ok",
 		Version:      s.version,
 		Uptime:       time.Since(s.started).Round(time.Second).String(),
-		Accounts:     len(s.store.Accounts),
+		Accounts:     s.store.AccountCount(),
 		Enabled:      len(s.store.Enabled()),
 		PolledAt:     snap.TakenAt,
 		Monitoring:   s.store.MonitoringEnabled(),
@@ -866,7 +866,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Read the token per request: recycling it must lock out old clients
 		// immediately, not at the next daemon restart.
-		want := []byte(s.store.APIToken)
+		want := []byte(s.store.Token())
 		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="omagihu"`)

@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestLoadMissingIsNotConfigured(t *testing.T) {
@@ -166,4 +168,83 @@ func TestNewAPITokenIsUniqueAndPrefixed(t *testing.T) {
 	if !strings.HasPrefix(a, "omagihu_") {
 		t.Errorf("token %q lacks the omagihu_ prefix", a)
 	}
+}
+
+// TestStoreConcurrentAccess exercises reads and mutations concurrently so the
+// race detector can prove the store's internal lock protects its fields when
+// the API mutates it (monitoring, notify, roots, token) while the auth
+// middleware, health handler and notifier read it. The store is exercised on a
+// temporary path so Save can run for real.
+func TestStoreConcurrentAccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	st := &Store{}
+	st.SetPath(path)
+	st.Upsert(Account{ID: "a@github.com", Login: "a", Token: "tok", Enabled: true})
+	if err := st.Save(); err != nil {
+		t.Fatalf("initial Save: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Writers: mutate configuration the way the API handlers do.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			switch i % 4 {
+			case 0:
+				st.SetMonitoring(i%2 == 0)
+			case 1:
+				st.SetInterval(1 + i%10)
+			case 2:
+				st.SetMCP(i%2 == 0)
+			default:
+				st.SetNotify("inbox", i%2 == 0)
+			}
+			if err := st.Save(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Readers: read configuration and the token the way the auth middleware,
+	// health handler and poller do.
+	for _, rd := range []struct {
+		name string
+		fn   func()
+	}{
+		{"token", func() { _ = st.Token() }},
+		{"monitoring", func() { _ = st.MonitoringEnabled() }},
+		{"interval", func() { _ = st.Interval() }},
+		{"mcp", func() { _ = st.MCPActive() }},
+		{"fetch", func() { _ = st.FetchActive(); _ = st.FetchInterval() }},
+		{"notify", func() { _ = st.NotifyOrDefault("inbox", true) }},
+		{"count", func() { _ = st.AccountCount() }},
+		{"enabled", func() { _ = st.Enabled() }},
+		{"redacted", func() { _ = st.Redacted() }},
+	} {
+		wg.Add(1)
+		go func(fn func()) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				fn()
+			}
+		}(rd.fn)
+	}
+
+	// Run briefly, then signal and wait for everything to settle.
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }
