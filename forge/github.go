@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -146,11 +147,13 @@ func (c *Client) inboxAt(ctx context.Context, base string, state InboxState) (it
 			resp.Body.Close()
 			return nil, state, false, rate, fmt.Errorf("notifications: %w (%s)", ErrUnauthorized, resp.Status)
 		default:
-			// 403 and 429 are rate limiting (403 when the quota budget is gone,
-			// 429 the dedicated status): recoverable, so the caller's existing
-			// backoff applies and the loop stays alive. Never ErrUnauthorized.
 			resp.Body.Close()
-			return nil, state, false, rate, fmt.Errorf("notifications returned %s", resp.Status)
+			if !rateLimited(resp.StatusCode, resp.Header) {
+				return nil, next, false, rate, fmt.Errorf("notifications: %w (%s)", ErrUnauthorized, resp.Status)
+			}
+			// next, not state: GitHub sends X-Poll-Interval precisely on a
+			// throttled answer to say how long to wait, and it was read above.
+			return nil, next, false, rate, fmt.Errorf("notifications returned %s", resp.Status)
 		}
 
 		// Last-Modified is a property of the whole list, taken from the first
@@ -168,7 +171,7 @@ func (c *Client) inboxAt(ctx context.Context, base string, state InboxState) (it
 		}
 		items = append(items, pageItems...)
 
-		url = nextLink(resp.Header.Get("Link"))
+		url = nextLink(resp.Header.Get("Link"), base)
 		if url == "" || page+1 >= maxPages {
 			return items, next, false, rate, nil
 		}
@@ -214,19 +217,57 @@ func decodeNotifications(body io.Reader, accountID string) ([]Notification, erro
 	return items, nil
 }
 
-// nextLink returns the URL GitHub points us at for the next page (the
-// rel="next" entry of the Link header), or "" on the last page.
-func nextLink(header string) string {
+// nextLink returns the URL to ask for the next page (the rel="next" entry of
+// the Link header), or "" on the last page.
+//
+// It is the only place a response decides where the next request goes, and
+// newRequest puts the bearer token on whatever it is handed, so the answer is
+// held to the scheme and host already being talked to. Anything else ends the
+// sweep: a short list is a better failure than an authenticated request
+// somewhere nobody chose.
+func nextLink(header, base string) string {
+	want, err := neturl.Parse(base)
+	if err != nil {
+		return ""
+	}
 	for _, part := range strings.Split(header, ",") {
 		link, params, found := strings.Cut(part, ";")
 		if !found {
 			continue
 		}
-		if strings.Contains(params, `rel="next"`) || strings.Contains(params, "rel=next") {
-			return strings.Trim(strings.TrimSpace(link), "<> ")
+		if !strings.Contains(params, `rel="next"`) && !strings.Contains(params, "rel=next") {
+			continue
 		}
+		raw := strings.Trim(strings.TrimSpace(link), "<> ")
+		got, err := neturl.Parse(raw)
+		if err != nil || got.Scheme != want.Scheme || got.Host != want.Host {
+			return ""
+		}
+		return raw
 	}
 	return ""
+}
+
+// rateLimited reports whether a refusal is the quota running out rather than
+// the token being wrong. GitHub answers 403 for both, and also for a missing
+// scope, for SSO enforcement and for a suspended token, none of which clear on
+// their own. Treating every 403 as recoverable leaves a wrongly-scoped token
+// retrying for ever and never telling anyone why nothing works, which is the
+// same silence this distinction exists to remove, pointed the other way.
+// Reads the headers rather than the parsed Rate on purpose: readRate turns a
+// missing X-RateLimit-Remaining into 0 through Atoi, so "we were not told"
+// would be indistinguishable from "the budget is spent" and every 403 would
+// look throttled again. Only a header that says so counts, plus Retry-After,
+// which is how a secondary limit announces itself while Remaining is still
+// positive.
+func rateLimited(status int, h http.Header) bool {
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	if status != http.StatusForbidden {
+		return false
+	}
+	return h.Get("X-RateLimit-Remaining") == "0" || h.Get("Retry-After") != ""
 }
 
 // PullRequest is one of the account's own PRs or one awaiting its review.
@@ -378,8 +419,10 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 	case http.StatusUnauthorized:
 		return Workload{}, rate, fmt.Errorf("workload: %w (%s)", ErrUnauthorized, resp.Status)
 	default:
-		// 403 (rate limit exhausted) and 429 are recoverable: back off, do not
-		// treat them as an invalid token that stops the account.
+		if !rateLimited(resp.StatusCode, resp.Header) {
+			return Workload{}, rate, fmt.Errorf("workload: %w (%s)", ErrUnauthorized, resp.Status)
+		}
+		// A spent budget is recoverable: back off rather than stop the account.
 		return Workload{}, rate, fmt.Errorf("workload query returned %s", resp.Status)
 	}
 

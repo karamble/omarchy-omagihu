@@ -447,61 +447,104 @@ func TestInboxLoopingLinkStops(t *testing.T) {
 
 func TestInboxStatusMapping(t *testing.T) {
 	for _, tc := range []struct {
-		status int
-		class  string
+		name    string
+		status  int
+		headers map[string]string
+		class   string
 	}{
-		{http.StatusUnauthorized, "unauthorized"},
-		{http.StatusForbidden, "recoverable"},
-		{http.StatusTooManyRequests, "recoverable"},
+		{"401", http.StatusUnauthorized, nil, "unauthorized"},
+		// A bare 403 carries no sign of a spent budget. GitHub answers 403 for
+		// a missing scope, for SSO enforcement and for a suspended token, none
+		// of which clear on their own, so retrying for ever would hide them.
+		{"403 with no rate signal", http.StatusForbidden, nil, "unauthorized"},
+		{"403 primary limit", http.StatusForbidden,
+			map[string]string{"X-RateLimit-Remaining": "0"}, "recoverable"},
+		{"403 secondary limit", http.StatusForbidden,
+			map[string]string{"X-RateLimit-Remaining": "482", "Retry-After": "60"}, "recoverable"},
+		{"429", http.StatusTooManyRequests, nil, "recoverable"},
 	} {
-		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
 				w.WriteHeader(tc.status)
 			}))
 			defer srv.Close()
 
 			c := testClient(t, srv)
 			_, _, _, _, err := c.inboxAt(t.Context(), srv.URL, InboxState{})
-			if tc.class == "unauthorized" {
-				if !errors.Is(err, ErrUnauthorized) {
-					t.Fatalf("401 error = %v, want ErrUnauthorized", err)
-				}
-				return
-			}
-			if errors.Is(err, ErrUnauthorized) {
-				t.Fatalf("%d must not be ErrUnauthorized, got %v", tc.status, err)
-			}
 			if err == nil {
-				t.Fatalf("%d should surface an error so the poller backs off, got nil", tc.status)
+				t.Fatalf("%s should surface an error, got nil", tc.name)
+			}
+			if got := errors.Is(err, ErrUnauthorized); got != (tc.class == "unauthorized") {
+				t.Fatalf("%s: ErrUnauthorized = %v, want %v (%v)", tc.name, got, tc.class == "unauthorized", err)
 			}
 		})
 	}
 }
 
 func TestWorkStatusMapping(t *testing.T) {
-	t.Run("unauthorized", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusUnauthorized)
-		}))
-		defer srv.Close()
-		c := testClient(t, srv)
-		_, _, err := c.workAt(t.Context(), srv.URL)
-		if !errors.Is(err, ErrUnauthorized) {
-			t.Fatalf("Work 401 error = %v, want ErrUnauthorized", err)
-		}
-	})
-	t.Run("forbidden_is_recoverable", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusForbidden)
-		}))
-		defer srv.Close()
-		c := testClient(t, srv)
-		_, _, err := c.workAt(t.Context(), srv.URL)
-		if errors.Is(err, ErrUnauthorized) {
-			t.Fatalf("Work 403 must not be ErrUnauthorized, got %v", err)
-		}
-		if err == nil {
-			t.Fatal("Work 403 should surface an error, got nil")
-		}
-	})
+	for _, tc := range []struct {
+		name    string
+		status  int
+		headers map[string]string
+		class   string
+	}{
+		{"401", http.StatusUnauthorized, nil, "unauthorized"},
+		{"403 with no rate signal", http.StatusForbidden, nil, "unauthorized"},
+		{"403 primary limit", http.StatusForbidden,
+			map[string]string{"X-RateLimit-Remaining": "0"}, "recoverable"},
+		{"429", http.StatusTooManyRequests, nil, "recoverable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			c := testClient(t, srv)
+			_, _, err := c.workAt(t.Context(), srv.URL)
+			if err == nil {
+				t.Fatalf("%s should surface an error, got nil", tc.name)
+			}
+			if got := errors.Is(err, ErrUnauthorized); got != (tc.class == "unauthorized") {
+				t.Fatalf("%s: ErrUnauthorized = %v, want %v (%v)", tc.name, got, tc.class == "unauthorized", err)
+			}
+		})
+	}
+}
+
+// TestNextLinkStaysOnTheSameHost pins the one place a response decides where
+// the next request goes. newRequest attaches the bearer token to whatever URL
+// it is handed, so a Link header pointing somewhere else would send the
+// account's GitHub token there. Pagination stops instead: a short list is a
+// better failure than an authenticated request nobody asked for.
+func TestNextLinkStaysOnTheSameHost(t *testing.T) {
+	const base = "https://api.github.com"
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"same host", `<https://api.github.com/notifications?page=2>; rel="next"`,
+			"https://api.github.com/notifications?page=2"},
+		{"unquoted rel", `<https://api.github.com/n?page=2>; rel=next`,
+			"https://api.github.com/n?page=2"},
+		{"last page", `<https://api.github.com/n?page=1>; rel="first"`, ""},
+		{"empty", "", ""},
+		{"another host", `<https://evil.invalid/notifications?page=2>; rel="next"`, ""},
+		{"downgraded to http", `<http://api.github.com/n?page=2>; rel="next"`, ""},
+		{"credentials in the url", `<https://api.github.com@evil.invalid/n>; rel="next"`, ""},
+		{"unparseable", `<://nonsense>; rel="next"`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nextLink(tc.header, base); got != tc.want {
+				t.Errorf("nextLink(%q) = %q, want %q", tc.header, got, tc.want)
+			}
+		})
+	}
 }
