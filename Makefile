@@ -33,11 +33,11 @@ PLUGIN_FILES := manifest.json Panel.qml Service.qml DashboardView.qml ReposView.
 		AlertsView.qml ArmForm.qml SettingsView.qml ListRow.qml Badge.qml \
 		README.md LICENSE preview.png
 
-.PHONY: all build test verify clean install install-check
+.PHONY: all build test verify toolchain clean install install-check
 
 all: build
 
-build: verify
+build: toolchain verify
 	@$(INSTALL) -d bin
 	@for b in $(BINARIES); do \
 		echo "building bin/$$b"; \
@@ -66,8 +66,39 @@ clean:
 	rm -rf bin
 
 # Check every module against the committed checksums before anything compiles.
-verify:
+verify: toolchain
 	@$(GO) mod verify >/dev/null || { echo "module verification failed"; exit 1; }
+
+# The one prerequisite the plugin cannot ship, checked before anything reaches
+# the compiler. Without this a missing toolchain arrived as "module
+# verification failed", which reads as though the checksums were wrong and
+# sends people looking in entirely the wrong place.
+#
+# Omarchy ships mise, so that is the first answer offered: it needs no root and
+# it is where the rest of a user's toolchains already live. mise having Go
+# while this shell cannot see it is its own case, because it means a new
+# terminal, not an install.
+toolchain:
+	@command -v $(GO) >/dev/null 2>&1 && exit 0; \
+	echo "omagihu builds from source and the Go toolchain is not on PATH."; \
+	echo; \
+	if command -v mise >/dev/null 2>&1 && mise which go >/dev/null 2>&1; then \
+		echo "  mise has Go, but this shell cannot see it. Open a new terminal and"; \
+		echo "  press Build again, or build against it directly:"; \
+		echo; \
+		echo "      make GO=$$(mise which go)"; \
+	elif command -v mise >/dev/null 2>&1; then \
+		echo "  Omarchy ships mise, so the shortest way is:"; \
+		echo; \
+		echo "      mise use -g go@latest"; \
+		echo; \
+		echo "  then open a new terminal and press Build again."; \
+	else \
+		echo "      sudo pacman -S go"; \
+	fi; \
+	echo; \
+	echo "Go $(shell sed -n 's/^go \([0-9.]*\)$$/\1/p' go.mod) or newer is needed."; \
+	exit 1
 
 install-check: verify
 	@command -v $(GO) >/dev/null || { echo "go toolchain not found"; exit 1; }
