@@ -57,9 +57,10 @@ type Rhythmic interface {
 	SetIntervalMinutes(int)
 }
 
-// Refreshable is anything that can be told to look again now.
-type Refreshable interface {
-	Refresh()
+// ForceRefreshable is anything that can be told to look again now with
+// an unconditional fetch (bypassing conditional cache).
+type ForceRefreshable interface {
+	ForceRefresh()
 }
 
 // Server holds the daemon state the HTTP handlers read.
@@ -722,12 +723,12 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var woke []string
-	if p, ok := s.poller.(Refreshable); ok {
-		p.Refresh()
+	if p, ok := s.poller.(ForceRefreshable); ok {
+		p.ForceRefresh()
 		woke = append(woke, "remote")
 	}
-	if wch, ok := s.watcher.(Refreshable); ok {
-		wch.Refresh()
+	if wch, ok := s.watcher.(ForceRefreshable); ok {
+		wch.ForceRefresh()
 		woke = append(woke, "local")
 	}
 	s.logger.Info("refresh requested", "planes", woke)

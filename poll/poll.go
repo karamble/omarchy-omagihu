@@ -71,50 +71,99 @@ type Poller struct {
 	mu    sync.Mutex
 	views map[string]*AccountView
 
-	snap   atomic.Pointer[Snapshot]
-	paused atomic.Bool
+	snap              atomic.Pointer[Snapshot]
+	paused            atomic.Bool
+	refreshGeneration atomic.Uint64 // incremented by ForceRefresh(); each loop tracks its own seen generation
 
-	// wakeMu guards wakeCh, which is closed to broadcast a wake to every
-	// waiting loop and then replaced. A buffered channel would only release
-	// one waiter; closing releases them all, which is what "refresh now" has
-	// to mean when several accounts are asleep.
-	wakeMu sync.Mutex
-	wakeCh chan struct{}
+	// wakeMu guards wakeTick and the broadcast below, so a decision to wake and
+	// the wait itself are atomic: a Wake() or ForceRefresh() can never be lost
+	// because a loop happened not to be waiting at that instant. (The old
+	// close-and-recreate channel leak got goroutines stuck between a fetch and
+	// a wait, missing the force until the next natural cycle.)
+	wakeMu   sync.Mutex
+	wakeTick uint64
+	wakeCond *sync.Cond
 }
 
-// Refresh cuts short every sleeping loop so the next poll happens now. A rhythm
-// of an hour used to mean an hour, even after the network came back.
-func (p *Poller) Refresh() {
+// Wake cuts short every sleeping loop so the next poll happens now.
+// A rhythm of an hour used to mean an hour, even after the network came back.
+// This does NOT force an unconditional GitHub fetch; it merely wakes the loops.
+// Use ForceRefresh() for user-initiated refreshes that must bypass conditional cache.
+func (p *Poller) Wake() {
 	p.wakeMu.Lock()
-	defer p.wakeMu.Unlock()
-	if p.wakeCh == nil {
-		return
-	}
-	close(p.wakeCh)
-	p.wakeCh = make(chan struct{})
+	p.wakeTick++
+	p.wakeCond.Broadcast()
+	p.wakeMu.Unlock()
 }
 
-// wakeSignal hands a loop the current broadcast channel to wait on.
-func (p *Poller) wakeSignal() <-chan struct{} {
-	p.wakeMu.Lock()
-	defer p.wakeMu.Unlock()
-	return p.wakeCh
+// ForceRefresh wakes all loops AND forces the next inbox fetch for each
+// account to be unconditional (no If-Modified-Since), bypassing any stale
+// 304 cache. This is for user-initiated refreshes via the panel/API.
+func (p *Poller) ForceRefresh() {
+	p.refreshGeneration.Add(1)
+	p.Wake()
 }
 
 // wait sleeps for d, returning false only when the context ends. A wake
-// broadcast returns early, so the caller polls immediately.
+// broadcast returns early, so the caller polls immediately. It is
+// generation-agnostic (used by the workLoop and paused checks), so a
+// ForceRefresh generation bump must not turn it into a busy loop.
 func (p *Poller) wait(ctx context.Context, d time.Duration) bool {
-	wake := p.wakeSignal()
-	t := time.NewTimer(d)
-	defer t.Stop()
+	_, ok := p.waitForced(ctx, d, p.refreshGeneration.Load())
+	return ok
+}
 
-	select {
-	case <-ctx.Done():
-		return false
-	case <-wake:
-		return true
-	case <-t.C:
-		return true
+// waitForced sleeps for d, waking early on a Wake() or a ForceRefresh()
+// generation change (so the inbox loop can clear its conditional state and
+// fetch unconditionally). It returns the latest refreshGeneration so the loop
+// records what it has seen.
+func (p *Poller) waitForced(ctx context.Context, d time.Duration, seenGen uint64) (uint64, bool) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	// timedOut is closed when the deadline (or context) fires; it is checked by
+	// the parked goroutine so a timeout looks like a wake to the Cond.
+	timedOut := make(chan struct{})
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+		case <-stop:
+			return
+		}
+		close(timedOut)
+		// Wake the parking goroutine; if it is mid-loop and not parked yet, the
+		// broadcast is harmless because waitForced re-checks its gates below.
+		p.wakeMu.Lock()
+		p.wakeCond.Broadcast()
+		p.wakeMu.Unlock()
+	}()
+
+	p.wakeMu.Lock()
+	lastTick := p.wakeTick
+	for {
+		cur := p.refreshGeneration.Load()
+		if cur != seenGen {
+			p.wakeMu.Unlock()
+			return cur, true
+		}
+		if ctx.Err() != nil {
+			p.wakeMu.Unlock()
+			return cur, false
+		}
+		select {
+		case <-timedOut:
+			p.wakeMu.Unlock()
+			return cur, true
+		default:
+		}
+		if p.wakeTick != lastTick {
+			p.wakeMu.Unlock()
+			return cur, true
+		}
+		p.wakeCond.Wait() // releases wakeMu while parked, reacquires on wake
 	}
 }
 
@@ -128,7 +177,8 @@ func (p *Poller) SetPaused(paused bool) {
 	}
 	p.logger.Info("remote polling resumed")
 	// Waking should poll now, not when the interrupted sleep would have ended.
-	p.Refresh()
+	// Use Wake() (not ForceRefresh()) so conditional requests are preserved.
+	p.Wake()
 }
 
 // Paused reports the current state of the switch.
@@ -140,8 +190,8 @@ func New(clients []Client, logger *slog.Logger, inboxEvery, workEvery time.Durat
 		clients: clients,
 		logger:  logger,
 		views:   make(map[string]*AccountView, len(clients)),
-		wakeCh:  make(chan struct{}),
 	}
+	p.wakeCond = sync.NewCond(&p.wakeMu)
 	p.SetIntervals(inboxEvery, workEvery)
 	for _, c := range clients {
 		a := c.Account()
@@ -160,7 +210,8 @@ func (p *Poller) SetIntervals(inbox, work time.Duration) {
 	p.logger.Info("polling rhythm set",
 		"inbox", max(inbox, minInterval), "work", max(work, minInterval))
 	// A new rhythm applies from now, not after the old one finishes waiting.
-	p.Refresh()
+	// Use Wake() (not ForceRefresh()) so conditional requests are preserved.
+	p.Wake()
 }
 
 // SetIntervalMinutes applies one rhythm to both loops, the shape the panel's
@@ -194,8 +245,9 @@ func (p *Poller) Run(ctx context.Context) {
 
 func (p *Poller) inboxLoop(ctx context.Context, c Client) {
 	var (
-		state forge.InboxState
-		fails int
+		state   forge.InboxState
+		fails   int
+		seenGen uint64
 	)
 	for {
 		if p.paused.Load() {
@@ -204,11 +256,25 @@ func (p *Poller) inboxLoop(ctx context.Context, c Client) {
 			}
 			continue
 		}
+		// If a forced refresh occurred since the generation we last acted on,
+		// clear LastModified to force an unconditional fetch and bypass any
+		// stale 304 cache. seenGen is advanced only after the fetch completes,
+		// so the clear is applied even when the force landed between a fetch
+		// and this loop's wait.
+		currentGen := p.refreshGeneration.Load()
+		forced := currentGen != seenGen
+		if forced {
+			state.LastModified = ""
+			p.logger.Debug("inbox: forced unconditional fetch", "generation", currentGen, "account", c.Account().ID)
+		}
 		items, next, unchanged, rate, err := c.Inbox(ctx, state)
 		if ctx.Err() != nil {
 			return
 		}
 		state = next
+		if forced {
+			seenGen = currentGen
+		}
 
 		switch {
 		case err != nil:
@@ -252,7 +318,11 @@ func (p *Poller) inboxLoop(ctx context.Context, c Client) {
 		if fails > 0 {
 			wait = backoff(wait, fails)
 		}
-		if !p.wait(ctx, wait) {
+		// Force-aware wait: returns immediately if a ForceRefresh() bumped the
+		// generation while this loop slept or was between calls, so no account
+		// misses an unconditional refresh. seenGen is only advanced after a fetch
+		// above; leaving it here means the top of the loop performs the clear.
+		if _, ok := p.waitForced(ctx, wait, seenGen); !ok {
 			return
 		}
 	}
