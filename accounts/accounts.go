@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/karamble/omarchy-omagihu/store"
 )
@@ -87,17 +88,37 @@ type Store struct {
 	// command line and could only be read back by parsing a service file.
 	Roots []string `json:"roots,omitempty"`
 
+	// mu guards every field of the store: the API mutates it from concurrent
+	// HTTP handlers (monitoring, notify, roots, token) while the auth
+	// middleware, health handler, alerts engine and notifier read it. A pointer
+	// so a zero-value Store (and the copy Redacted returns) does not copy a
+	// held lock; it is created on first use and never serialised.
+	mu *sync.RWMutex
+
 	path string
+}
+
+// lock hands back the store's mutex, creating it on first use so a zero-value
+// Store is usable and Redacted can safely return a copy without shipping a lock.
+func (s *Store) lock() *sync.RWMutex {
+	if s.mu == nil {
+		s.mu = &sync.RWMutex{}
+	}
+	return s.mu
 }
 
 // MonitoringEnabled reports whether the daemon may talk to anything at all.
 // When it is false omagihu makes no outbound request of any kind.
 func (s *Store) MonitoringEnabled() bool {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	return s.Monitoring == nil || *s.Monitoring
 }
 
 // SetMonitoring records the master switch.
 func (s *Store) SetMonitoring(enabled bool) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
 	s.Monitoring = &enabled
 }
 
@@ -113,6 +134,8 @@ type NotifyPrefs struct {
 
 // NotifyOrDefault resolves one domain against the supplied fallback.
 func (s *Store) NotifyOrDefault(domain string, fallback bool) bool {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	if s.Notify == nil {
 		return fallback
 	}
@@ -137,6 +160,8 @@ func (s *Store) NotifyOrDefault(domain string, fallback bool) bool {
 
 // SetNotify records one domain switch.
 func (s *Store) SetNotify(domain string, enabled bool) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
 	if s.Notify == nil {
 		s.Notify = &NotifyPrefs{}
 	}
@@ -159,11 +184,15 @@ const DefaultFetchMin = 30
 
 // FetchActive reports whether background fetching is on.
 func (s *Store) FetchActive() bool {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	return s.FetchEnabled == nil || *s.FetchEnabled
 }
 
 // FetchInterval reports the background fetch cadence in minutes.
 func (s *Store) FetchInterval() int {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	if s.FetchMin == nil || *s.FetchMin <= 0 {
 		return DefaultFetchMin
 	}
@@ -173,6 +202,8 @@ func (s *Store) FetchInterval() int {
 // SetFetch records the background fetch switch and cadence. A non-positive
 // number of minutes leaves the cadence alone.
 func (s *Store) SetFetch(enabled bool, minutes int) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
 	s.FetchEnabled = &enabled
 	if minutes > 0 {
 		s.FetchMin = &minutes
@@ -181,17 +212,23 @@ func (s *Store) SetFetch(enabled bool, minutes int) {
 
 // MCPActive reports whether the MCP endpoint should be served.
 func (s *Store) MCPActive() bool {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	return s.MCPEnabled == nil || *s.MCPEnabled
 }
 
 // SetMCP records whether the MCP endpoint is served.
 func (s *Store) SetMCP(enabled bool) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
 	s.MCPEnabled = &enabled
 }
 
 // RootsOrDefault is where to look for checkouts, falling back to the defaults
 // when nothing has been chosen yet.
 func (s *Store) RootsOrDefault(fallback []string) []string {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	if len(s.Roots) == 0 {
 		return fallback
 	}
@@ -200,6 +237,8 @@ func (s *Store) RootsOrDefault(fallback []string) []string {
 
 // SetRoots records the directories to watch.
 func (s *Store) SetRoots(roots []string) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
 	s.Roots = slices.Clone(roots)
 }
 
@@ -210,7 +249,9 @@ func (s *Store) RecycleAPIToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	s.lock().Lock()
 	s.APIToken = tok
+	s.lock().Unlock()
 	return tok, nil
 }
 
@@ -219,6 +260,8 @@ const DefaultIntervalMin = 5
 
 // Interval reports the chosen polling rhythm in minutes.
 func (s *Store) Interval() int {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	if s.IntervalMin == nil || *s.IntervalMin <= 0 {
 		return DefaultIntervalMin
 	}
@@ -227,6 +270,8 @@ func (s *Store) Interval() int {
 
 // SetInterval records the polling rhythm in minutes.
 func (s *Store) SetInterval(minutes int) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
 	if minutes > 0 {
 		s.IntervalMin = &minutes
 	}
@@ -271,6 +316,8 @@ func Load(path string) (*Store, error) {
 
 // Save writes the store atomically at 0600, minting an APIToken if absent.
 func (s *Store) Save() error {
+	s.lock().Lock()
+	defer s.lock().Unlock()
 	if s.path == "" {
 		s.path = DefaultPath()
 	}
@@ -300,6 +347,8 @@ func (s *Store) Save() error {
 
 // Path reports where the store was loaded from or will be written.
 func (s *Store) Path() string {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	if s.path == "" {
 		return DefaultPath()
 	}
@@ -307,10 +356,33 @@ func (s *Store) Path() string {
 }
 
 // SetPath overrides the location, for tests and for --config.
-func (s *Store) SetPath(path string) { s.path = path }
+func (s *Store) SetPath(path string) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
+	s.path = path
+}
+
+// Token returns the bearer token that guards the daemon's API. Reading through
+// a method (rather than the field) lets callers hold it while a recycle handler
+// rewrites it under the lock.
+func (s *Store) Token() string {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
+	return s.APIToken
+}
+
+// AccountCount reports how many identities are configured, for the health
+// handler that only needs a number and must not race an Upsert.
+func (s *Store) AccountCount() int {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
+	return len(s.Accounts)
+}
 
 // Enabled returns the accounts the pollers should run for.
 func (s *Store) Enabled() []Account {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	var out []Account
 	for _, a := range s.Accounts {
 		if a.Enabled {
@@ -322,6 +394,8 @@ func (s *Store) Enabled() []Account {
 
 // Find returns the account with the given id.
 func (s *Store) Find(id string) (Account, bool) {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	i := slices.IndexFunc(s.Accounts, func(a Account) bool { return a.ID == id })
 	if i < 0 {
 		return Account{}, false
@@ -331,6 +405,8 @@ func (s *Store) Find(id string) (Account, bool) {
 
 // Upsert adds an account or replaces the one sharing its id.
 func (s *Store) Upsert(a Account) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
 	if i := slices.IndexFunc(s.Accounts, func(x Account) bool { return x.ID == a.ID }); i >= 0 {
 		s.Accounts[i] = a
 		return
@@ -341,6 +417,8 @@ func (s *Store) Upsert(a Account) {
 // Redacted copies the store with every secret replaced, for logs and for the
 // accounts endpoint. Tokens must never leave the process.
 func (s *Store) Redacted() Store {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
 	out := Store{
 		Version:      s.Version,
 		APIToken:     redact(s.APIToken),
