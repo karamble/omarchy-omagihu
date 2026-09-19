@@ -101,6 +101,12 @@ Panel {
   // committed, so a fresh clone lands here and has to say so rather than sit
   // on "connecting" for ever.
   property bool helperMissing: false
+  // Set when the helpers exist but were built before the source they came
+  // from. omarchy plugin update fast-forwards the checkout and never compiles,
+  // so the panel would otherwise keep running last month's binary against this
+  // month's code with nothing on screen to say so. Distinct from
+  // helperMissing: a stale binary still answers, it is just behind.
+  property bool helperStale: false
   property string lastError: ""
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -186,6 +192,7 @@ Panel {
   function refresh() {
     if (!helperProbe.running) helperProbe.running = true
     if (!setupProbe.running) setupProbe.running = true
+    if (!stalenessProbe.running) stalenessProbe.running = true
     if (!fetchProc.running) fetchProc.running = true
   }
 
@@ -328,6 +335,11 @@ Panel {
   readonly property string launcher:
     "/usr/share/omarchy/bin/omarchy-launch-floating-terminal-with-presentation"
 
+  // The shell owns the daemon, so a fresh binary on disk changes nothing until
+  // the shell starts it. Absolute for the same reason the launcher is.
+  readonly property string restarter:
+    "/usr/share/omarchy/bin/omarchy-restart-shell"
+
   function runSetup(command) {
     Quickshell.execDetached([root.launcher, command])
   }
@@ -340,6 +352,16 @@ Panel {
   function runBuildAndInstall() {
     root.runSetup("make -C " + root.shellQuote(root.pluginDir) +
                   " && " + root.shellQuote(root.setupPath) + " install")
+  }
+
+  // A rebuild is not a first install: omagihu-setup install seeds an account
+  // and asks which directories to watch, which is the wrong thing to put in
+  // front of somebody whose only problem is an out-of-date binary. Compile,
+  // then restart the shell, because that is what actually replaces the running
+  // daemon.
+  function runRebuild() {
+    root.runSetup("make -C " + root.shellQuote(root.pluginDir) +
+                  " && " + root.shellQuote(root.restarter))
   }
 
   function runSetupCommand(sub) {
@@ -459,6 +481,33 @@ Panel {
     onExited: function(code, status) {
       root.setupOk = code === 0
       root.settleProbes()
+    }
+  }
+
+  // Whether the helpers are older than what they were built from. find exits
+  // zero whether or not it matches, so unlike the two probes above this one is
+  // read from stdout: any path at all means something changed after the build.
+  // -quit stops at the first, so the cost does not grow with the checkout.
+  //
+  // Only Go sources count. QML is read at load, so a QML change needs the
+  // shell restarted rather than anything compiled, and counting it would ask
+  // for a rebuild that fixes nothing.
+  Process {
+    id: stalenessProbe
+    clearEnvironment: true
+    environment: root.childEnv
+    command: ["/usr/bin/find", root.pluginDir,
+              "(", "-name", "*.go", "-o", "-name", "go.mod", "-o", "-name", "go.sum", ")",
+              "-newer", root.helperPath, "-print", "-quit"]
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        // A missing helper makes find fail with nothing on stdout, which reads
+        // as current. That is right: helperMissing already covers it and is
+        // the more useful thing to say.
+        root.helperStale = String(text || "").trim() !== ""
+      }
     }
   }
 
@@ -620,6 +669,7 @@ Panel {
     }
     tooltipText: {
       if (root.helperMissing) return "Omagihu: not built yet, run make in the plugin directory"
+      if (root.helperStale) return "Omagihu: the helpers are older than the source, rebuild to pick up the change"
       if (!root.snap) return "Omagihu: connecting"
       if (!root.monitoring) return "Omagihu: asleep\nNothing is being polled and no data leaves this machine."
       var a = root.attention
@@ -891,6 +941,52 @@ Panel {
         }
 
         PanelSeparator { width: parent.width; visible: !root.helperMissing }
+
+        // ---------- built, but behind the source ----------
+        // A banner rather than a takeover: the dashboard below it is still
+        // correct as far as the old binary goes, and blanking it to report
+        // staleness would cost more than it tells.
+        Column {
+          width: parent.width
+          visible: root.helperStale && !root.helperMissing
+          spacing: Style.space(6)
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "The helpers were built before the source they came from. "
+                + "Updating the plugin fetches the code but does not compile it, "
+                + "so anything added since the last build is missing here."
+            color: Color.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Button {
+            text: "Rebuild and restart"
+            iconText: root.iconRefresh
+            bordered: true
+            foreground: root.foreground
+            accent: Color.accent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.body
+            onClicked: root.runRebuild()
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "This compiles in a terminal and then restarts the shell, which is "
+                + "what swaps the running daemon for the one just built."
+            color: Qt.darker(root.foreground, 1.4)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          PanelSeparator { width: parent.width }
+        }
 
         // ---------- not built yet ----------
         Column {
