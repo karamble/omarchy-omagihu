@@ -248,3 +248,32 @@ func TestStoreConcurrentAccess(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestStoreConcurrentFromCold is the case TestStoreConcurrentAccess cannot
+// reach. That test calls SetPath, Upsert and Save on one goroutine first,
+// which is enough to settle any lazily-created lock before the workers start.
+// The daemon does no such thing: Load assigns s.path directly, so the store it
+// hands to the API, the notifier and the alerts engine has never been touched
+// when they all reach it at once.
+func TestStoreConcurrentFromCold(t *testing.T) {
+	st := &Store{}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			if n%2 == 0 {
+				st.SetMonitoring(n%4 == 0)
+				st.SetInterval(n + 1)
+				return
+			}
+			_ = st.MonitoringEnabled()
+			_ = st.Interval()
+			_ = st.Token()
+			_ = st.AccountCount()
+			_ = st.Redacted()
+		}(i)
+	}
+	wg.Wait()
+}

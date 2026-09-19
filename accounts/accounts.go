@@ -90,22 +90,20 @@ type Store struct {
 
 	// mu guards every field of the store: the API mutates it from concurrent
 	// HTTP handlers (monitoring, notify, roots, token) while the auth
-	// middleware, health handler, alerts engine and notifier read it. A pointer
-	// so a zero-value Store (and the copy Redacted returns) does not copy a
-	// held lock; it is created on first use and never serialised.
-	mu *sync.RWMutex
+	// middleware, health handler, alerts engine and notifier read it.
+	//
+	// A plain value, not a pointer created on first use. Lazy creation is
+	// itself a race: two callers arriving together both see nil, both
+	// allocate, and one write wins, so they guard different mutexes and the
+	// lock does nothing. Load() assigns s.path directly and never takes the
+	// lock, so the store the daemon builds reaches every goroutine cold and
+	// hits exactly that. Never serialised.
+	mu sync.RWMutex
 
 	path string
 }
 
-// lock hands back the store's mutex, creating it on first use so a zero-value
-// Store is usable and Redacted can safely return a copy without shipping a lock.
-func (s *Store) lock() *sync.RWMutex {
-	if s.mu == nil {
-		s.mu = &sync.RWMutex{}
-	}
-	return s.mu
-}
+func (s *Store) lock() *sync.RWMutex { return &s.mu }
 
 // MonitoringEnabled reports whether the daemon may talk to anything at all.
 // When it is false omagihu makes no outbound request of any kind.
@@ -416,7 +414,11 @@ func (s *Store) Upsert(a Account) {
 
 // Redacted copies the store with every secret replaced, for logs and for the
 // accounts endpoint. Tokens must never leave the process.
-func (s *Store) Redacted() Store {
+//
+// A pointer, because the store holds a lock and returning one by value copies
+// it, which vet refuses and which would hand the caller a second lock over
+// the same data. The only caller encodes it as JSON, where it makes no odds.
+func (s *Store) Redacted() *Store {
 	s.lock().RLock()
 	defer s.lock().RUnlock()
 	out := Store{
@@ -433,7 +435,7 @@ func (s *Store) Redacted() Store {
 		a.Token = redact(a.Token)
 		out.Accounts = append(out.Accounts, a)
 	}
-	return out
+	return &out
 }
 
 func redact(secret string) string {
