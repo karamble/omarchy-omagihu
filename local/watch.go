@@ -97,6 +97,11 @@ func (w *Watcher) Refresh() {
 	}
 }
 
+// ForceRefresh satisfies ForceRefreshable for the API's user-initiated
+// refresh. For the local watcher this is equivalent to Refresh() since
+// there is no conditional GitHub cache to bypass.
+func (w *Watcher) ForceRefresh() { w.Refresh() }
+
 // NewWatcher builds a watcher. Nothing runs until Run is called.
 func NewWatcher(cfg Config, logger *slog.Logger, refresh, rediscover time.Duration) *Watcher {
 	w := &Watcher{
