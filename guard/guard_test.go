@@ -206,11 +206,15 @@ func TestRebuildPromptIsDistinctFromFirstBuild(t *testing.T) {
 		t.Error("runRebuild runs omagihu-setup, which asks for directories already answered")
 	}
 
-	// Only Go sources should trigger it: QML is read at load, so a QML change
-	// needs a restart rather than a compile.
+	// Only Go that reaches the binary should trigger it. QML is read at load,
+	// and most commits touch a test, so counting either would light the badge
+	// for a rebuild that changes nothing.
 	probe := source[strings.Index(source, "id: stalenessProbe"):]
 	probe = probe[:strings.Index(probe, "stdout:")]
 	if strings.Contains(probe, "*.qml") {
 		t.Error("the staleness probe counts QML, which never needs compiling")
+	}
+	if !strings.Contains(probe, `"-not", "-name", "*_test.go"`) {
+		t.Error("the staleness probe counts test files, which never reach the binary")
 	}
 }

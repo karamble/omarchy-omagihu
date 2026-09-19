@@ -489,15 +489,19 @@ Panel {
   // read from stdout: any path at all means something changed after the build.
   // -quit stops at the first, so the cost does not grow with the checkout.
   //
-  // Only Go sources count. QML is read at load, so a QML change needs the
-  // shell restarted rather than anything compiled, and counting it would ask
-  // for a rebuild that fixes nothing.
+  // Only Go that reaches the binary counts. QML is read at load, so a QML
+  // change needs the shell restarted rather than anything compiled. Tests are
+  // left out for the same reason and it matters more than it sounds: most
+  // commits touch a test, so counting them would light the badge after almost
+  // every update for a rebuild that changes nothing, and a badge that is
+  // usually wrong stops being read.
   Process {
     id: stalenessProbe
     clearEnvironment: true
     environment: root.childEnv
     command: ["/usr/bin/find", root.pluginDir,
-              "(", "-name", "*.go", "-o", "-name", "go.mod", "-o", "-name", "go.sum", ")",
+              "(", "-name", "*.go", "-not", "-name", "*_test.go",
+              "-o", "-name", "go.mod", "-o", "-name", "go.sum", ")",
               "-newer", root.helperPath, "-print", "-quit"]
 
     stdout: StdioCollector {
