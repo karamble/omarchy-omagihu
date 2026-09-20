@@ -33,7 +33,7 @@ PLUGIN_FILES := manifest.json Panel.qml Service.qml DashboardView.qml ReposView.
 		AlertsView.qml ArmForm.qml SettingsView.qml ListRow.qml Badge.qml \
 		README.md LICENSE preview.png
 
-.PHONY: all build test verify toolchain clean install install-check
+.PHONY: all build test verify toolchain clean install install-check lint
 
 all: build
 
@@ -104,3 +104,21 @@ install-check: verify
 	@command -v $(GO) >/dev/null || { echo "go toolchain not found"; exit 1; }
 	@command -v git >/dev/null || { echo "git not found"; exit 1; }
 	@echo "toolchain ok, modules verified"
+
+# The qmllint and qmlformat on PATH may not be Qt 6's: some distributions ship
+# an unrelated binary of the same name that reports version 1.0 and fails on
+# `pragma ComponentBehavior: Bound` with no output at all. Prefer Qt's own.
+QMLLINT   := $(shell command -v qmllint6 2>/dev/null || echo /usr/lib/qt6/bin/qmllint)
+QMLFORMAT := $(shell command -v qmlformat6 2>/dev/null || echo /usr/lib/qt6/bin/qmlformat)
+SHELL_DIR := $(or $(OMARCHY_PATH),/usr/share/omarchy)/shell
+LINTROOT  := $(CURDIR)/.lintroot
+QMLFILES  := $(shell find . -name '*.qml' -not -path './.git/*' -not -path './.lintroot/*')
+
+lint:
+	@for f in $(QMLFILES); do $(QMLFORMAT) "$$f" >/dev/null || { echo "failed to parse $$f"; exit 1; }; done
+	@echo "qml: all files parse"
+	@# `import qs.Ui` resolves as <import path>/qs/Ui/qmldir, so the shell has
+	@# to be reachable under a directory named `qs`.
+	@mkdir -p $(LINTROOT) && ln -sfn $(SHELL_DIR) $(LINTROOT)/qs
+	$(QMLLINT) -I $(LINTROOT) $(QMLFILES)
+	@rm -rf $(LINTROOT)

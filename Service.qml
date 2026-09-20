@@ -71,8 +71,18 @@ Item {
 
     onExited: function (code, status) {
       if (code === 0) daemon.running = true
-      else root.lastError = "not built yet"
+      else { root.lastError = "not built yet"; reprobe.restart() }
     }
+  }
+
+  // Keep looking while there is nothing to run, so building the helper starts
+  // the daemon without a shell restart. One shot per probe: the probe arms it
+  // again when it still finds nothing.
+  Timer {
+    id: reprobe
+    interval: 5000
+    repeat: false
+    onTriggered: if (!daemon.running) probe.running = true
   }
 
   Process {
