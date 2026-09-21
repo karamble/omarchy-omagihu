@@ -1,5 +1,6 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
 
@@ -166,6 +167,7 @@ Column {
       Repeater {
         model: view.rhythms
         delegate: BorderSurface {
+          id: rhythmChip
           required property var modelData
           required property int index
           readonly property bool hasCursor: view.owner.cursor === view.rowOf("rhythm")
@@ -190,7 +192,7 @@ Column {
           Text {
             anchors.centerIn: parent
             textFormat: Text.PlainText
-            text: modelData.label
+            text: rhythmChip.modelData.label
             font.family: view.fontFamily
             font.pixelSize: Style.font.caption
             font.bold: parent.isSelected
@@ -200,7 +202,7 @@ Column {
           MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: view.owner.setRhythm(modelData.value)
+            onClicked: view.owner.setRhythm(rhythmChip.modelData.value)
           }
         }
       }
@@ -239,15 +241,18 @@ Column {
     Repeater {
       model: view.notifyDomains
       delegate: Toggle {
+        id: domain
+        required property var modelData
+        required property int index
         width: view.width
-        hasCursor: view.owner.cursor === view.rowOf("notify", index)
-        label: modelData.label
-        description: modelData.hint
-        checked: view.owner.notifyEnabled(modelData.key)
+        hasCursor: view.owner.cursor === view.rowOf("notify", domain.index)
+        label: domain.modelData.label
+        description: domain.modelData.hint
+        checked: view.owner.notifyEnabled(domain.modelData.key)
         foreground: view.foreground
         accent: Color.accent
         fontFamily: view.fontFamily
-        onClicked: view.owner.setNotify(modelData.key, !view.owner.notifyEnabled(modelData.key))
+        onClicked: view.owner.setNotify(domain.modelData.key, !view.owner.notifyEnabled(domain.modelData.key))
       }
     }
 
@@ -383,11 +388,12 @@ Column {
       Repeater {
         model: view.cadences
         delegate: BorderSurface {
+          id: cadenceChip
           required property int index
           readonly property bool hasCursor: view.owner.cursor === view.rowOf("cadence")
                                             && view.owner.actionIndex === index
           required property var modelData
-          readonly property bool isSelected: view.owner.fetchMin === modelData.value
+          readonly property bool isSelected: view.owner.fetchMin === cadenceChip.modelData.value
 
           width: Style.space(46)
           implicitHeight: Style.space(24)
@@ -401,7 +407,7 @@ Column {
           Text {
             anchors.centerIn: parent
             textFormat: Text.PlainText
-            text: modelData.label
+            text: cadenceChip.modelData.label
             font.family: view.fontFamily
             font.pixelSize: Style.font.caption
             font.bold: parent.isSelected
@@ -411,7 +417,7 @@ Column {
           MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: view.owner.setFetch(true, modelData.value)
+            onClicked: view.owner.setFetch(true, cadenceChip.modelData.value)
           }
         }
       }
@@ -675,6 +681,7 @@ Column {
     Repeater {
       model: view.accounts
       delegate: Text {
+        required property var modelData
         textFormat: Text.PlainText
         width: view.width
         wrapMode: Text.WordWrap

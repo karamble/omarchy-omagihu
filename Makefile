@@ -140,8 +140,14 @@ lint: qmltools
 	@# `import qs.Ui` resolves as <import path>/qs/Ui/qmldir, so the shell has
 	@# to be reachable under a directory named `qs`.
 	@mkdir -p $(LINTROOT) && ln -sfn $(SHELL_DIR) $(LINTROOT)/qs
-	$(QMLLINT) -I $(LINTROOT) $(QMLFILES)
-	@rm -rf $(LINTROOT)
+	@# Only the two categories this plugin can clear are errors. The rest are
+	@# the shell's own types: Style.font is declared upstream as a bare
+	@# QtObject, so qmllint cannot see caption or body on it however the lint
+	@# is invoked. Gating on those would hand this build to somebody else's
+	@# refactor. They stay reported, and the count is the thing to watch.
+	@# The status is kept across the cleanup so a failure still fails.
+	@$(QMLLINT) --unqualified error --unused-imports error -I $(LINTROOT) $(QMLFILES); \
+	  status=$$?; rm -rf $(LINTROOT); exit $$status
 
 # The gate every change passes before it lands: vet, gofmt, the race suite and
 # a QML parse. verify brings the toolchain preflight with it, so a missing Go
