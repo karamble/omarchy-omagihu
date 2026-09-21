@@ -191,23 +191,28 @@ func (s *Server) Handler() http.Handler {
 }
 
 type healthResponse struct {
-	Status       string       `json:"status"`
-	Version      string       `json:"version"`
-	Uptime       string       `json:"uptime"`
-	Accounts     int          `json:"accounts"`
-	Enabled      int          `json:"enabled"`
-	PolledAt     time.Time    `json:"polledAt,omitzero"`
-	RateLeft     int          `json:"rateLeft"`
-	Monitoring   bool         `json:"monitoring"`
-	IntervalMin  int          `json:"intervalMin"`
-	MCPEnabled   bool         `json:"mcpEnabled"`
-	FetchEnabled bool         `json:"fetchEnabled"`
-	FetchMin     int          `json:"fetchMin"`
-	Notify       notify.Prefs `json:"notify"`
-	Repos        int          `json:"repos"`
-	ReposRisk    int          `json:"reposAtRisk"`
-	ScannedAt    time.Time    `json:"scannedAt,omitzero"`
-	LastError    string       `json:"lastError,omitempty"`
+	Status   string    `json:"status"`
+	Version  string    `json:"version"`
+	Uptime   string    `json:"uptime"`
+	Accounts int       `json:"accounts"`
+	Enabled  int       `json:"enabled"`
+	PolledAt time.Time `json:"polledAt,omitzero"`
+	// The REST budget the inbox spends and the GraphQL budget the workload
+	// spends, each summed across accounts.
+	InboxRateLeft int          `json:"inboxRateLeft"`
+	WorkRateLeft  int          `json:"workRateLeft"`
+	Monitoring    bool         `json:"monitoring"`
+	IntervalMin   int          `json:"intervalMin"`
+	MCPEnabled    bool         `json:"mcpEnabled"`
+	FetchEnabled  bool         `json:"fetchEnabled"`
+	FetchMin      int          `json:"fetchMin"`
+	Notify        notify.Prefs `json:"notify"`
+	Repos         int          `json:"repos"`
+	ReposRisk     int          `json:"reposAtRisk"`
+	ScannedAt     time.Time    `json:"scannedAt,omitzero"`
+	// Errors is every live poll error, one line per account and plane. Always
+	// a list, empty when healthy.
+	Errors []string `json:"errors"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -228,11 +233,20 @@ func (s *Server) health(snap *poll.Snapshot, repos *local.Snapshot) healthRespon
 		FetchEnabled: s.store.FetchActive(),
 		FetchMin:     s.store.FetchInterval(),
 		Notify:       s.NotifyPrefs(),
+		Errors:       []string{},
 	}
 	for _, a := range snap.Accounts {
-		resp.RateLeft += a.Rate.Remaining
-		if a.Error != "" && resp.LastError == "" {
-			resp.LastError = a.Error
+		resp.InboxRateLeft += a.InboxRate.Remaining
+		resp.WorkRateLeft += a.WorkRate.Remaining
+		who := a.Login
+		if who == "" {
+			who = a.AccountID
+		}
+		if a.InboxError != "" {
+			resp.Errors = append(resp.Errors, who+" inbox: "+a.InboxError)
+		}
+		if a.WorkError != "" {
+			resp.Errors = append(resp.Errors, who+" work: "+a.WorkError)
 		}
 	}
 
@@ -570,10 +584,11 @@ func (s *Server) AlertSample() alerts.Snapshot {
 			Facts:    facts,
 		}),
 		Health: alerts.Health{
-			Repos:      health.Repos,
-			RateLeft:   health.RateLeft,
-			Monitoring: health.Monitoring,
-			LastError:  health.LastError,
+			Repos:         health.Repos,
+			InboxRateLeft: health.InboxRateLeft,
+			WorkRateLeft:  health.WorkRateLeft,
+			Monitoring:    health.Monitoring,
+			LastError:     strings.Join(health.Errors, "; "),
 		},
 		Inbox:    inbox,
 		Reviews:  work.ReviewRequests,

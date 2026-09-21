@@ -95,7 +95,7 @@ func TestCrossesRearmsOnlyPastTheMargin(t *testing.T) {
 func TestCrossesBelow(t *testing.T) {
 	now := time.Now()
 	tr := armed("health.rateLeft", OpCrosses, Params{Below: ptr(500)})
-	snap := func(n int) Snapshot { return Snapshot{Health: Health{RateLeft: n}} }
+	snap := func(n int) Snapshot { return Snapshot{Health: Health{InboxRateLeft: n, WorkRateLeft: n}} }
 
 	Evaluate(tr, snap(4000), now)
 	if fires := Evaluate(tr, snap(499), now); len(fires) != 1 {

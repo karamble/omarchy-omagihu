@@ -172,7 +172,8 @@ func Demo() any {
 		Health: healthResponse{
 			Status: "ok", Version: "demo", Uptime: "3h12m",
 			Accounts: 2, Enabled: 2, PolledAt: ago(41 * time.Second),
-			RateLeft: 4837, Monitoring: true, IntervalMin: 5,
+			InboxRateLeft: 4837, WorkRateLeft: 4991, Errors: []string{},
+			Monitoring: true, IntervalMin: 5,
 			MCPEnabled: true, FetchEnabled: true, FetchMin: 30,
 			Notify: notify.Prefs{Reviews: true, Broken: true, Local: true, Reconcile: true},
 			Repos:  len(repos), ReposRisk: 2, ScannedAt: ago(20 * time.Second),
@@ -192,13 +193,15 @@ func Demo() any {
 		Accounts: []poll.AccountView{
 			{
 				AccountID: "demo", Login: "you",
-				Rate:    forge.Rate{Limit: 5000, Remaining: 4837},
-				InboxAt: ago(41 * time.Second), WorkAt: ago(2 * time.Minute),
+				InboxRate: forge.Rate{Limit: 5000, Remaining: 4837},
+				WorkRate:  forge.Rate{Limit: 5000, Remaining: 4991},
+				InboxAt:   ago(41 * time.Second), WorkAt: ago(2 * time.Minute),
 			},
 			{
 				AccountID: "demo-work", Login: "you-at-work",
-				Rate:    forge.Rate{Limit: 5000, Remaining: 4991},
-				InboxAt: ago(58 * time.Second), WorkAt: ago(3 * time.Minute),
+				InboxRate: forge.Rate{Limit: 5000, Remaining: 4991},
+				WorkRate:  forge.Rate{Limit: 5000, Remaining: 4988},
+				InboxAt:   ago(58 * time.Second), WorkAt: ago(3 * time.Minute),
 			},
 		},
 	}

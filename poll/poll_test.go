@@ -38,6 +38,11 @@ type fakeClient struct {
 	workErr error
 	work    forge.Workload
 
+	// A held plane blocks inside its call until the context ends, so a test
+	// can drive the other loop on its own. A held call is not counted.
+	holdInbox bool
+	holdWork  bool
+
 	polled chan struct{} // signalled once per inbox call
 }
 
@@ -51,6 +56,14 @@ func newFake(id string) *fakeClient {
 func (f *fakeClient) Account() accounts.Account { return f.account }
 
 func (f *fakeClient) Inbox(ctx context.Context, state forge.InboxState) ([]forge.Notification, forge.InboxState, bool, forge.Rate, error) {
+	f.mu.Lock()
+	held := f.holdInbox
+	f.mu.Unlock()
+	if held {
+		<-ctx.Done()
+		return nil, state, false, forge.Rate{}, ctx.Err()
+	}
+
 	f.mu.Lock()
 	f.inboxCall++
 	f.inboxStates = append(f.inboxStates, state.LastModified)
@@ -86,6 +99,14 @@ func (f *fakeClient) Inbox(ctx context.Context, state forge.InboxState) ([]forge
 
 func (f *fakeClient) Work(ctx context.Context) (forge.Workload, forge.Rate, error) {
 	f.mu.Lock()
+	held := f.holdWork
+	f.mu.Unlock()
+	if held {
+		<-ctx.Done()
+		return forge.Workload{}, forge.Rate{}, ctx.Err()
+	}
+
+	f.mu.Lock()
 	f.workCall++
 	err, work := f.workErr, f.work
 	f.mu.Unlock()
@@ -93,7 +114,7 @@ func (f *fakeClient) Work(ctx context.Context) (forge.Workload, forge.Rate, erro
 	if err != nil {
 		return forge.Workload{}, forge.Rate{}, err
 	}
-	return work, forge.Rate{Remaining: 4999, Limit: 5000}, nil
+	return work, forge.Rate{Remaining: 4000, Limit: 5000}, nil
 }
 
 // setWork changes what Work returns from now on.
@@ -101,6 +122,13 @@ func (f *fakeClient) setWork(work forge.Workload) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.work = work
+}
+
+// hold parks the named planes from their next call on.
+func (f *fakeClient) hold(inbox, work bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdInbox, f.holdWork = inbox, work
 }
 
 // setErrors changes what both calls return from now on.
@@ -207,11 +235,12 @@ func TestRunPopulatesSnapshot(t *testing.T) {
 	if len(view.AuthoredPRs) != 1 || view.AuthoredPRs[0].ChecksState != "FAILURE" {
 		t.Errorf("AuthoredPRs = %+v, want the fake's failing PR", view.AuthoredPRs)
 	}
-	if view.Rate.Remaining != 4999 {
-		t.Errorf("Rate.Remaining = %d, want 4999", view.Rate.Remaining)
+	if view.InboxRate.Remaining != 4999 || view.WorkRate.Remaining != 4000 {
+		t.Errorf("rates = inbox %d work %d, want 4999 and 4000: each loop reports its own bucket",
+			view.InboxRate.Remaining, view.WorkRate.Remaining)
 	}
-	if view.Error != "" {
-		t.Errorf("Error = %q, want empty", view.Error)
+	if view.InboxError != "" || view.WorkError != "" {
+		t.Errorf("errors = inbox %q work %q, want both empty", view.InboxError, view.WorkError)
 	}
 }
 
@@ -242,8 +271,8 @@ func TestRunStopsAccountOnUnauthorized(t *testing.T) {
 	}
 
 	snap := p.Snapshot()
-	if len(snap.Accounts) != 1 || snap.Accounts[0].Error == "" {
-		t.Errorf("snapshot = %+v, want the account carrying its error", snap.Accounts)
+	if len(snap.Accounts) != 1 || snap.Accounts[0].InboxError == "" || snap.Accounts[0].WorkError == "" {
+		t.Errorf("snapshot = %+v, want the account carrying both errors", snap.Accounts)
 	}
 	if !errors.Is(fake.inboxErr, forge.ErrUnauthorized) {
 		t.Error("fixture no longer wraps ErrUnauthorized")
@@ -764,8 +793,8 @@ func TestRunSurvivesRecoverableFailures(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond)
 			}
-			if snap := p.Snapshot(); snap.Accounts[0].Error == "" {
-				t.Error("the failure was not reported on the account view")
+			if v := p.Snapshot().Accounts[0]; v.InboxError == "" || v.WorkError == "" {
+				t.Errorf("errors = inbox %q work %q, want the failure reported on both planes", v.InboxError, v.WorkError)
 			}
 
 			// GitHub recovers. Wake the loops out of their backoff until each has
@@ -789,9 +818,9 @@ func TestRunSurvivesRecoverableFailures(t *testing.T) {
 			default:
 			}
 			deadline = time.Now().Add(5 * time.Second)
-			for p.Snapshot().Accounts[0].Error != "" {
+			for v := p.Snapshot().Accounts[0]; v.InboxError != "" || v.WorkError != ""; v = p.Snapshot().Accounts[0] {
 				if time.Now().After(deadline) {
-					t.Fatalf("Error = %q after recovery, want cleared", p.Snapshot().Accounts[0].Error)
+					t.Fatalf("errors = inbox %q work %q after recovery, want both cleared", v.InboxError, v.WorkError)
 				}
 				time.Sleep(time.Millisecond)
 			}
@@ -915,12 +944,160 @@ func TestRunKeepsUnresolvedLists(t *testing.T) {
 	if len(v.ReviewRequests) != 1 || v.ReviewRequests[0].Number != 1 {
 		t.Errorf("ReviewRequests = %+v, want the previous value kept", v.ReviewRequests)
 	}
-	if !strings.Contains(v.Error, "partially") || !strings.Contains(v.Error, "not accessible") {
-		t.Errorf("Error = %q, want it to say the answer was partial and why", v.Error)
+	if !strings.Contains(v.WorkPartial, "not accessible") {
+		t.Errorf("WorkPartial = %q, want it to say why the answer was partial", v.WorkPartial)
+	}
+	if v.WorkError != "" {
+		t.Errorf("WorkError = %q, want empty: a partial answer is not a failure", v.WorkError)
 	}
 	select {
 	case <-done:
 		t.Fatal("Run returned: a partial answer stopped the account")
 	default:
 	}
+}
+
+// waitCalls blocks until the fake has been polled at least inbox and work
+// times, so a test can reason about what happened after a given point.
+func waitCalls(t *testing.T, p *Poller, fake *fakeClient, inbox, work int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.Wake()
+		i, w := fake.calls()
+		if i >= inbox && w >= work {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("calls = inbox %d work %d, wanted at least %d and %d", i, w, inbox, work)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestErrorOnOnePlaneSurvivesSuccessOnTheOther is the regression #13 exists
+// for: a healthy poll on one plane used to clear the other plane's error. The
+// failing loop is parked after its first failure so nothing rewrites the
+// error behind the test's back.
+func TestErrorOnOnePlaneSurvivesSuccessOnTheOther(t *testing.T) {
+	t.Run("work error outlives inbox successes", func(t *testing.T) {
+		fake := newFake("a")
+		fake.setErrors(nil, &forge.APIError{Op: "workload", Status: 502, Class: forge.ErrTransient})
+		p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go p.Run(ctx)
+
+		waitCalls(t, p, fake, 1, 1)
+		fake.hold(false, true)
+		inbox, _ := fake.calls()
+		waitCalls(t, p, fake, inbox+3, 1)
+
+		v := p.Snapshot().Accounts[0]
+		if v.WorkError == "" {
+			t.Fatal("a successful inbox poll erased the workload error")
+		}
+		if v.InboxError != "" {
+			t.Fatalf("InboxError = %q, want empty", v.InboxError)
+		}
+	})
+
+	t.Run("inbox error outlives work successes", func(t *testing.T) {
+		fake := newFake("a")
+		fake.setErrors(&forge.APIError{Op: "notifications", Status: 502, Class: forge.ErrTransient}, nil)
+		p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go p.Run(ctx)
+
+		waitCalls(t, p, fake, 1, 1)
+		fake.hold(true, false)
+		_, work := fake.calls()
+		waitCalls(t, p, fake, 1, work+3)
+
+		v := p.Snapshot().Accounts[0]
+		if v.InboxError == "" {
+			t.Fatal("a successful workload poll erased the inbox error")
+		}
+		if v.WorkError != "" {
+			t.Fatalf("WorkError = %q, want empty", v.WorkError)
+		}
+	})
+}
+
+// TestRejectedTokenLeavesWorkErrorInPlace pins the worst case: the work loop
+// has exited, so nothing will ever rewrite its message, and the inbox loop
+// keeps succeeding.
+func TestRejectedTokenLeavesWorkErrorInPlace(t *testing.T) {
+	fake := newFake("a")
+	fake.setErrors(nil, fmt.Errorf("workload: %w (401)", forge.ErrUnauthorized))
+	p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Run(ctx)
+	}()
+
+	waitCalls(t, p, fake, 1, 1)
+	inbox, _ := fake.calls()
+	waitCalls(t, p, fake, inbox+5, 1)
+
+	if _, work := fake.calls(); work != 1 {
+		t.Fatalf("work calls = %d, want 1: a rejected token stops the loop", work)
+	}
+	select {
+	case <-done:
+		t.Fatal("Run returned: the inbox loop should still be running")
+	default:
+	}
+	v := p.Snapshot().Accounts[0]
+	if !strings.Contains(v.WorkError, "401") {
+		t.Fatalf("WorkError = %q, want the rejection kept after the loop exited", v.WorkError)
+	}
+	if v.InboxError != "" {
+		t.Fatalf("InboxError = %q, want empty", v.InboxError)
+	}
+}
+
+// TestRateBucketsAreKeptApart pins that the REST and GraphQL budgets never
+// overwrite each other: one loop is parked while the other polls repeatedly,
+// and the parked loop's bucket must not move.
+func TestRateBucketsAreKeptApart(t *testing.T) {
+	t.Run("work polls leave the inbox bucket alone", func(t *testing.T) {
+		fake := newFake("a")
+		p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go p.Run(ctx)
+
+		waitCalls(t, p, fake, 1, 1)
+		fake.hold(true, false)
+		_, work := fake.calls()
+		waitCalls(t, p, fake, 1, work+3)
+
+		v := p.Snapshot().Accounts[0]
+		if v.InboxRate.Remaining != 4999 || v.WorkRate.Remaining != 4000 {
+			t.Fatalf("rates = inbox %d work %d, want 4999 and 4000", v.InboxRate.Remaining, v.WorkRate.Remaining)
+		}
+	})
+
+	t.Run("inbox polls leave the work bucket alone", func(t *testing.T) {
+		fake := newFake("a")
+		p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go p.Run(ctx)
+
+		waitCalls(t, p, fake, 1, 1)
+		fake.hold(false, true)
+		inbox, _ := fake.calls()
+		waitCalls(t, p, fake, inbox+3, 1)
+
+		v := p.Snapshot().Accounts[0]
+		if v.InboxRate.Remaining != 4999 || v.WorkRate.Remaining != 4000 {
+			t.Fatalf("rates = inbox %d work %d, want 4999 and 4000", v.InboxRate.Remaining, v.WorkRate.Remaining)
+		}
+	})
 }

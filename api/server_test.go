@@ -1,7 +1,10 @@
 package api
 
 import (
+	"encoding/json"
 	"log/slog"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,5 +85,63 @@ func TestAlertSampleTakesOneSnapshotPair(t *testing.T) {
 	}
 	if !sample.TakenAt.Equal(first) {
 		t.Fatalf("TakenAt = %v, want %v", sample.TakenAt, first)
+	}
+}
+
+// fixedPoller serves one snapshot on every call.
+type fixedPoller struct{ snap *poll.Snapshot }
+
+func (p fixedPoller) Snapshot() *poll.Snapshot { return p.snap }
+
+type fixedWatcher struct{ snap *local.Snapshot }
+
+func (w fixedWatcher) Snapshot() *local.Snapshot { return w.snap }
+
+func TestHealthCarriesEveryAccountError(t *testing.T) {
+	remote := &poll.Snapshot{Accounts: []poll.AccountView{
+		{AccountID: "id-a", Login: "a", InboxError: "notifications: 502",
+			InboxRate: forge.Rate{Remaining: 10}, WorkRate: forge.Rate{Remaining: 20}},
+		{AccountID: "id-b", WorkError: "workload: 401",
+			InboxRate: forge.Rate{Remaining: 5}, WorkRate: forge.Rate{Remaining: 7}},
+	}}
+	s := NewServer(&accounts.Store{}, fixedPoller{remote}, fixedWatcher{&local.Snapshot{}},
+		slog.New(slog.DiscardHandler), "test")
+
+	h := s.health(remote, &local.Snapshot{})
+	want := []string{"a inbox: notifications: 502", "id-b work: workload: 401"}
+	if !slices.Equal(h.Errors, want) {
+		t.Fatalf("Errors = %q, want %q: every account and plane, login first, id as fallback", h.Errors, want)
+	}
+	if h.InboxRateLeft != 15 || h.WorkRateLeft != 27 {
+		t.Fatalf("rate left = inbox %d work %d, want 15 and 27: buckets summed separately", h.InboxRateLeft, h.WorkRateLeft)
+	}
+
+	sample := s.AlertSample()
+	if sample.Health.LastError != "a inbox: notifications: 502; id-b work: workload: 401" {
+		t.Fatalf("alert LastError = %q, want the joined list", sample.Health.LastError)
+	}
+	if got, _ := sample.Number("health.rateLeft"); got != 15 {
+		t.Fatalf("health.rateLeft = %v, want 15: the tighter bucket", got)
+	}
+}
+
+func TestHealthErrorsIsAnEmptyListWhenHealthy(t *testing.T) {
+	remote := &poll.Snapshot{Accounts: []poll.AccountView{{AccountID: "a", Login: "a"}}}
+	s := NewServer(&accounts.Store{}, fixedPoller{remote}, fixedWatcher{&local.Snapshot{}},
+		slog.New(slog.DiscardHandler), "test")
+
+	raw, err := json.Marshal(s.health(remote, &local.Snapshot{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"errors":[]`, `"inboxRateLeft":0`, `"workRateLeft":0`} {
+		if !strings.Contains(string(raw), key) {
+			t.Errorf("health JSON lacks %s: %s", key, raw)
+		}
+	}
+	for _, gone := range []string{`"lastError"`, `"rateLeft"`} {
+		if strings.Contains(string(raw), gone) {
+			t.Errorf("health JSON still carries %s: %s", gone, raw)
+		}
 	}
 }

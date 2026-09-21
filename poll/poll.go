@@ -47,10 +47,20 @@ type AccountView struct {
 	AssignedIssues []forge.Issue        `json:"assignedIssues"`
 	AuthoredIssues []forge.Issue        `json:"authoredIssues"`
 	MergedPRs      []forge.PullRequest  `json:"mergedPrs"`
-	Rate           forge.Rate           `json:"rate"`
-	InboxAt        time.Time            `json:"inboxAt,omitzero"`
-	WorkAt         time.Time            `json:"workAt,omitzero"`
-	Error          string               `json:"error,omitempty"`
+	// REST and GraphQL are separate budgets at GitHub, so each loop reports
+	// its own.
+	InboxRate forge.Rate `json:"inboxRate"`
+	WorkRate  forge.Rate `json:"workRate"`
+	InboxAt   time.Time  `json:"inboxAt,omitzero"`
+	WorkAt    time.Time  `json:"workAt,omitzero"`
+	// Each loop writes and clears only its own error, so a healthy poll on
+	// one plane never hides a failure on the other.
+	InboxError string `json:"inboxError,omitempty"`
+	WorkError  string `json:"workError,omitempty"`
+	// WorkPartial names what the last workload answer left out. The poll
+	// succeeded and the lists it delivered are current; only the ones named
+	// here are stale.
+	WorkPartial string `json:"workPartial,omitempty"`
 }
 
 // Snapshot is a consistent read across every account.
@@ -281,8 +291,8 @@ func (p *Poller) inboxLoop(ctx context.Context, c Client) {
 		case err != nil:
 			fails++
 			p.update(c, func(v *AccountView) {
-				v.Error = err.Error()
-				v.Rate = rate
+				v.InboxError = err.Error()
+				v.InboxRate = rate
 			})
 			// Only a rejected token stops the loop. Everything else, a spent
 			// budget, a 502, a resource the token cannot see, backs off.
@@ -297,8 +307,8 @@ func (p *Poller) inboxLoop(ctx context.Context, c Client) {
 			p.logger.Debug("inbox unchanged (304)",
 				"account", c.Account().ID, "rateRemaining", rate.Remaining)
 			p.update(c, func(v *AccountView) {
-				v.Error = ""
-				v.Rate = rate
+				v.InboxError = ""
+				v.InboxRate = rate
 				v.InboxAt = time.Now()
 			})
 		default:
@@ -306,9 +316,9 @@ func (p *Poller) inboxLoop(ctx context.Context, c Client) {
 			p.logger.Debug("inbox fetched",
 				"account", c.Account().ID, "items", len(items), "rateRemaining", rate.Remaining)
 			p.update(c, func(v *AccountView) {
-				v.Error = ""
+				v.InboxError = ""
 				v.Notifications = items
-				v.Rate = rate
+				v.InboxRate = rate
 				v.InboxAt = time.Now()
 			})
 		}
@@ -348,8 +358,8 @@ func (p *Poller) workLoop(ctx context.Context, c Client) {
 		if err != nil {
 			fails++
 			p.update(c, func(v *AccountView) {
-				v.Error = err.Error()
-				v.Rate = rate
+				v.WorkError = err.Error()
+				v.WorkRate = rate
 			})
 			if errors.Is(err, forge.ErrUnauthorized) {
 				p.logger.Error("workload: token rejected, pausing this account",
@@ -366,10 +376,8 @@ func (p *Poller) workLoop(ctx context.Context, c Client) {
 					"account", c.Account().ID, "errors", work.Warnings, "unresolved", work.Unresolved)
 			}
 			p.update(c, func(v *AccountView) {
-				v.Error = ""
-				if len(work.Warnings) > 0 {
-					v.Error = "workload answered partially: " + strings.Join(work.Warnings, "; ")
-				}
+				v.WorkError = ""
+				v.WorkPartial = strings.Join(work.Warnings, "; ")
 				if work.Resolved("login") {
 					v.Login = work.Login
 				}
@@ -388,7 +396,7 @@ func (p *Poller) workLoop(ctx context.Context, c Client) {
 				if work.Resolved("mergedPrs") {
 					v.MergedPRs = work.MergedPRs
 				}
-				v.Rate = rate
+				v.WorkRate = rate
 				v.WorkAt = time.Now()
 			})
 		}

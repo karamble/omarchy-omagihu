@@ -668,13 +668,19 @@ Column {
         text: {
           var line = modelData.login || modelData.accountId
           var bits = []
-          if (modelData.rate && modelData.rate.limit > 0)
-            bits.push(modelData.rate.remaining + "/" + modelData.rate.limit + " rate left")
+          if (modelData.inboxRate && modelData.inboxRate.limit > 0)
+            bits.push("inbox rate " + modelData.inboxRate.remaining + "/" + modelData.inboxRate.limit)
+          if (modelData.workRate && modelData.workRate.limit > 0)
+            bits.push("work rate " + modelData.workRate.remaining + "/" + modelData.workRate.limit)
           bits.push("inbox " + view.ago(modelData.inboxAt))
-          if (modelData.error) bits.push("error: " + modelData.error)
+          bits.push("work " + view.ago(modelData.workAt))
+          if (modelData.inboxError) bits.push("inbox error: " + modelData.inboxError)
+          if (modelData.workError) bits.push("work error: " + modelData.workError)
+          // A partial answer is not an error: the poll succeeded with holes.
+          if (modelData.workPartial) bits.push("partial answer: " + modelData.workPartial)
           return line + "  ·  " + bits.join(" • ")
         }
-        color: modelData.error ? Color.urgent : Qt.darker(view.foreground, 1.2)
+        color: (modelData.inboxError || modelData.workError) ? Color.urgent : Qt.darker(view.foreground, 1.2)
         font.family: view.fontFamily
         font.pixelSize: Style.font.caption
       }
@@ -721,10 +727,9 @@ Column {
       textFormat: Text.PlainText
       width: parent.width
       wrapMode: Text.WordWrap
-      // lastError is omitted from the payload when empty, so both bindings have
-      // to survive it being undefined rather than "".
-      visible: !!(view.health && view.health.lastError)
-      text: (view.health && view.health.lastError) ? String(view.health.lastError) : ""
+      // errors is every live poll error, one line per account and plane.
+      visible: !!(view.health && view.health.errors && view.health.errors.length > 0)
+      text: (view.health && view.health.errors) ? view.health.errors.join("\n") : ""
       color: Color.urgent
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption

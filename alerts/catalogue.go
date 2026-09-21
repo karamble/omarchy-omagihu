@@ -82,11 +82,11 @@ func Catalogue() []Leaf {
 		{Path: "health.repos", Kind: KindNumber, Operators: numberOps,
 			Describes: "how many checkouts are watched"},
 		{Path: "health.rateLeft", Kind: KindNumber, Operators: numberOps,
-			Describes: "GitHub rate budget remaining"},
+			Describes: "the tighter of the two GitHub rate budgets remaining, REST or GraphQL"},
 		{Path: "health.monitoring", Kind: KindBool, Operators: textOps,
 			Describes: "whether polling is on at all"},
 		{Path: "health.lastError", Kind: KindText, Operators: textOps,
-			Describes: "the most recent poll error, empty when healthy"},
+			Describes: "every live poll error across accounts, joined; empty when healthy"},
 
 		// ---- the lists, where most of the interesting waiting happens
 		{Path: "inbox", Kind: KindList, Operators: listOps,
@@ -150,10 +150,11 @@ type Snapshot struct {
 
 // Health is the handful of daemon numbers worth watching.
 type Health struct {
-	Repos      int
-	RateLeft   int
-	Monitoring bool
-	LastError  string
+	Repos         int
+	InboxRateLeft int
+	WorkRateLeft  int
+	Monitoring    bool
+	LastError     string
 }
 
 // Number resolves a numeric path, reporting false when the path is not one.
@@ -176,7 +177,8 @@ func (s Snapshot) Number(path string) (float64, bool) {
 	case "health.repos":
 		return float64(s.Health.Repos), true
 	case "health.rateLeft":
-		return float64(s.Health.RateLeft), true
+		// One number for a trigger: whichever budget runs out first.
+		return float64(min(s.Health.InboxRateLeft, s.Health.WorkRateLeft)), true
 	}
 	return 0, false
 }
