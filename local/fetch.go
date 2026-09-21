@@ -93,11 +93,19 @@ func (w *Watcher) fetchAll(ctx context.Context) {
 		return
 	}
 
+	// Worktrees share one object store, so a repository is fetched once,
+	// from its main checkout when that is watched, and every checkout is
+	// re-read afterwards.
 	w.mu.Lock()
 	paths := make([]string, 0, len(w.repos))
+	fetchFrom := make(map[string]string)
 	for path, repo := range w.repos {
-		if len(repo.Remotes) > 0 {
-			paths = append(paths, path)
+		if len(repo.Remotes) == 0 {
+			continue
+		}
+		paths = append(paths, path)
+		if prev, seen := fetchFrom[repo.GroupKey()]; !seen || repo.Main || (!w.repos[prev].Main && path < prev) {
+			fetchFrom[repo.GroupKey()] = path
 		}
 	}
 	w.mu.Unlock()
@@ -110,7 +118,7 @@ func (w *Watcher) fetchAll(ctx context.Context) {
 	var ok atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(fetchLimit)
-	for _, path := range paths {
+	for _, path := range fetchFrom {
 		g.Go(func() error {
 			fctx, cancel := context.WithTimeout(gctx, fetchTimeout)
 			defer cancel()
@@ -132,7 +140,7 @@ func (w *Watcher) fetchAll(ctx context.Context) {
 		return
 	}
 	w.logger.Info("background fetch done",
-		"repos", len(paths), "ok", ok.Load(), "took", time.Since(started).Round(time.Second))
+		"repos", len(fetchFrom), "ok", ok.Load(), "took", time.Since(started).Round(time.Second))
 
 	// Counts computed before the fetch are now out of date, so re-read them.
 	w.inspectAll(ctx, paths)
