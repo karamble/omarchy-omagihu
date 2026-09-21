@@ -549,21 +549,25 @@ func (s *Server) facts() []correlate.Fact {
 // SetEngine hands the API the alert engine once it exists.
 func (s *Server) SetEngine(e *alerts.Engine) { s.engine = e }
 
-// AlertSample builds what a trigger is evaluated against, from the same state
-// the panel renders, so an alarm and a person can never disagree.
+// AlertSample builds what a trigger is evaluated against from one pair of
+// snapshots, the same state the panel renders, so an alarm and a person can
+// never disagree. Every field derives from that pair; nothing takes a snapshot
+// of its own.
 func (s *Server) AlertSample() alerts.Snapshot {
 	remote := s.poller.Snapshot()
 	repos := s.watcher.Snapshot()
 	work := s.mergedWork(remote)
 	health := s.health(remote, repos)
+	inbox := s.mergedInbox(remote)
+	facts := correlate.Correlate(remote, repos)
 
 	return alerts.Snapshot{
 		Attention: attention.Resolve(attention.Input{
 			Reviews:  work.ReviewRequests,
 			Authored: work.AuthoredPRs,
-			Unread:   s.mergedInbox(remote),
+			Unread:   inbox,
 			Repos:    repos.Repos,
-			Facts:    s.facts(),
+			Facts:    facts,
 		}),
 		Health: alerts.Health{
 			Repos:      health.Repos,
@@ -571,12 +575,12 @@ func (s *Server) AlertSample() alerts.Snapshot {
 			Monitoring: health.Monitoring,
 			LastError:  health.LastError,
 		},
-		Inbox:    s.mergedInbox(remote),
+		Inbox:    inbox,
 		Reviews:  work.ReviewRequests,
 		Authored: work.AuthoredPRs,
 		Merged:   work.MergedPRs,
 		Issues:   work.AssignedIssues,
-		Facts:    s.facts(),
+		Facts:    facts,
 		Repos:    repos.Repos,
 		TakenAt:  repos.TakenAt,
 	}
