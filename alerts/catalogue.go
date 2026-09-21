@@ -51,7 +51,8 @@ var (
 
 // prFields are shared by every pull request list.
 var (
-	prFields   = []string{"repo", "number", "title", "author", "headRef", "reviewDecision", "checksState", "isDraft"}
+	prFields = []string{"repo", "number", "title", "author", "accountId", "url",
+		"headRef", "baseRef", "headSha", "reviewDecision", "checksState", "isDraft", "incoming"}
 	prIdentity = []string{"repo", "number"}
 	prTimes    = []string{"updatedAt", "mergedAt"}
 )
@@ -91,7 +92,7 @@ func Catalogue() []Leaf {
 		// ---- the lists, where most of the interesting waiting happens
 		{Path: "inbox", Kind: KindList, Operators: listOps,
 			Describes:  "unread GitHub notifications",
-			Fields:     []string{"repo", "type", "title", "reason", "accountId"},
+			Fields:     []string{"repo", "type", "title", "reason", "accountId", "unread", "url", "subjectUrl"},
 			Identity:   []string{"id"},
 			TimeFields: []string{"updatedAt"}},
 		{Path: "work.reviewRequests", Kind: KindList, Operators: listOps,
@@ -105,19 +106,25 @@ func Catalogue() []Leaf {
 			Fields:    prFields, Identity: prIdentity, TimeFields: prTimes},
 		{Path: "work.assignedIssues", Kind: KindList, Operators: listOps,
 			Describes:  "issues waiting on you: assigned to you, or opened by somebody else on a repository you own (incoming)",
-			Fields:     []string{"repo", "number", "title", "author", "incoming"},
+			Fields:     []string{"repo", "number", "title", "author", "incoming", "accountId", "url", "labels"},
 			Identity:   []string{"repo", "number"},
 			TimeFields: []string{"updatedAt"}},
 		{Path: "facts", Kind: KindList, Operators: listOpsNoAge,
 			Describes: "where GitHub and this machine disagree",
-			Fields:    []string{"kind", "severity", "repo", "path", "branch", "number"},
+			Fields:    []string{"kind", "severity", "repo", "path", "branch", "number", "summary", "detail", "url"},
 			Identity:  []string{"kind", "path", "branch"}},
 		{Path: "repos", Kind: KindList, Operators: listOps,
 			Describes: "watched local checkouts",
-			Fields: []string{"name", "path", "branch", "upstream", "operation",
-				"unpushed", "behind", "upstreamBehind", "staged", "modified", "untracked", "conflicted", "stashes"},
-			Identity:   []string{"path"},
-			TimeFields: []string{"observedAt"}},
+			Fields: []string{"name", "path", "branch", "upstream", "operation", "remotes",
+				"group", "main", "prunable", "followed", "detached", "noUpstream",
+				"unpushed", "stranded", "ahead", "behind",
+				"upstreamBehind", "upstreamBase", "baseBehind", "baseBranch",
+				"staged", "modified", "deleted", "untracked", "conflicted", "stashes",
+				"lastSha", "lastSubject", "lastAuthor", "error"},
+			Identity: []string{"path"},
+			// observedAt stays first: ages with no field named falls back to
+			// TimeFields[0], and that default must keep meaning "last looked at".
+			TimeFields: []string{"observedAt", "lastCommitAt"}},
 	}
 }
 
@@ -204,8 +211,8 @@ func (s Snapshot) List(path string) ([]map[string]any, bool) {
 		for _, n := range s.Inbox {
 			out = append(out, map[string]any{
 				"id": n.ID, "repo": n.Repo, "type": n.Type, "title": n.Title,
-				"reason": n.Reason, "accountId": n.AccountID,
-				"updatedAt": n.UpdatedAt, "url": n.WebURL,
+				"reason": n.Reason, "accountId": n.AccountID, "unread": n.Unread,
+				"updatedAt": n.UpdatedAt, "url": n.WebURL, "subjectUrl": n.SubjectURL,
 			})
 		}
 		return out, true
@@ -220,8 +227,8 @@ func (s Snapshot) List(path string) ([]map[string]any, bool) {
 		for _, i := range s.Issues {
 			out = append(out, map[string]any{
 				"repo": i.Repo, "number": i.Number, "title": i.Title,
-				"author": i.Author, "incoming": i.Incoming,
-				"updatedAt": i.UpdatedAt, "url": i.URL,
+				"author": i.Author, "incoming": i.Incoming, "accountId": i.AccountID,
+				"updatedAt": i.UpdatedAt, "url": i.URL, "labels": joinLabels(i.Labels),
 			})
 		}
 		return out, true
@@ -231,7 +238,7 @@ func (s Snapshot) List(path string) ([]map[string]any, bool) {
 			out = append(out, map[string]any{
 				"kind": string(f.Kind), "severity": f.Severity, "repo": f.Repo,
 				"path": f.Path, "branch": f.Branch, "number": f.Number,
-				"summary": f.Summary, "url": f.URL,
+				"summary": f.Summary, "detail": f.Detail, "url": f.URL,
 			})
 		}
 		return out, true
@@ -241,10 +248,18 @@ func (s Snapshot) List(path string) ([]map[string]any, bool) {
 			out = append(out, map[string]any{
 				"name": r.Name, "path": r.Path, "branch": r.Branch,
 				"upstream": r.Upstream, "operation": string(r.Operation),
-				"unpushed": r.Unpushed, "behind": r.Behind,
-				"upstreamBehind": r.UpstreamBehind, "staged": r.Staged,
-				"modified": r.Modified, "untracked": r.Untracked,
-				"conflicted": r.Conflicted, "stashes": r.Stashes, "observedAt": r.ObservedAt,
+				"remotes": joinRemotes(r.Remotes),
+				"group":   r.Group, "main": r.Main, "prunable": r.Prunable,
+				"followed": r.Followed, "detached": r.Detached, "noUpstream": r.NoUpstream,
+				"unpushed": r.Unpushed, "stranded": r.Stranded,
+				"ahead": r.Ahead, "behind": r.Behind,
+				"upstreamBehind": r.UpstreamBehind, "upstreamBase": r.UpstreamBase,
+				"baseBehind": r.BaseBehind, "baseBranch": r.BaseBranch,
+				"staged": r.Staged, "modified": r.Modified, "deleted": r.Deleted,
+				"untracked": r.Untracked, "conflicted": r.Conflicted, "stashes": r.Stashes,
+				"lastSha": r.Last.SHA, "lastSubject": r.Last.Subject,
+				"lastAuthor": r.Last.Author, "lastCommitAt": r.Last.At,
+				"error": r.Error, "observedAt": r.ObservedAt,
 			})
 		}
 		return out, true
@@ -257,10 +272,11 @@ func pullRequests(prs []forge.PullRequest) []map[string]any {
 	for _, pr := range prs {
 		out = append(out, map[string]any{
 			"repo": pr.Repo, "number": pr.Number, "title": pr.Title,
-			"author": pr.Author, "headRef": pr.HeadRef,
+			"author": pr.Author, "accountId": pr.AccountID,
+			"headRef": pr.HeadRef, "baseRef": pr.BaseRef, "headSha": pr.HeadSHA,
 			"reviewDecision": pr.ReviewDecision, "checksState": pr.ChecksState,
-			"isDraft": pr.IsDraft, "updatedAt": pr.UpdatedAt,
-			"mergedAt": pr.MergedAt, "url": pr.URL,
+			"isDraft": pr.IsDraft, "incoming": pr.Incoming,
+			"updatedAt": pr.UpdatedAt, "mergedAt": pr.MergedAt, "url": pr.URL,
 		})
 	}
 	return out
@@ -276,6 +292,35 @@ func identityOf(entry map[string]any, fields []string) string {
 }
 
 // filter keeps the entries every where clause accepts.
+// joinLabels flattens an issue's labels to their names. A where clause
+// compares with fmt.Sprint, so a slice would be matched against its Go
+// formatting, braces and colours and all, which nobody would guess. Joined,
+// `labels ~= bug` works with the operator that already exists.
+func joinLabels(labels []forge.Label) string {
+	names := make([]string, 0, len(labels))
+	for _, l := range labels {
+		names = append(names, l.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+// joinRemotes flattens a checkout's remotes to name=url pairs, sorted so the
+// same checkout always samples the same string. It is the only way to filter
+// checkouts by which repository they are: name is the directory's basename,
+// which need not match the repository at all.
+func joinRemotes(remotes map[string]string) string {
+	names := make([]string, 0, len(remotes))
+	for n := range remotes {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	pairs := make([]string, 0, len(names))
+	for _, n := range names {
+		pairs = append(pairs, n+"="+remotes[n])
+	}
+	return strings.Join(pairs, " ")
+}
+
 func filter(entries []map[string]any, wheres []Where) []map[string]any {
 	if len(wheres) == 0 {
 		return entries

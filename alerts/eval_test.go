@@ -1,7 +1,9 @@
 package alerts
 
 import (
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -470,5 +472,157 @@ func TestListFieldsAreSampled(t *testing.T) {
 				t.Errorf("%s names %q but the sampler does not set it", leaf.Path, field)
 			}
 		}
+	}
+}
+
+// TestEveryCollectedFieldIsWatchable is the other direction of
+// TestListFieldsAreSampled. That one catches a field the catalogue names and
+// the sampler forgets; this one catches a field the collector gathers and the
+// catalogue never names, which is silently unwatchable. Nothing caught that
+// before, which is how the lists drifted far enough to need an audit.
+//
+// A field that cannot be carried under its own name is listed in flattened,
+// against the keys that do carry it. That table is the only place an omission
+// can live, so adding a field to one of these structs without exposing it
+// fails here rather than in a future audit.
+func TestEveryCollectedFieldIsWatchable(t *testing.T) {
+	flattened := map[string][]string{
+		"webUrl":  {"url"},     // the browser url is named url throughout
+		"labels":  {"labels"},  // joined names, so ~= can match one
+		"remotes": {"remotes"}, // joined name=url pairs
+		"last":    {"lastSha", "lastSubject", "lastAuthor", "lastCommitAt"},
+	}
+
+	for path, sample := range map[string]any{
+		"inbox":               forge.Notification{},
+		"work.reviewRequests": forge.PullRequest{},
+		"work.authoredPrs":    forge.PullRequest{},
+		"work.mergedPrs":      forge.PullRequest{},
+		"work.assignedIssues": forge.Issue{},
+		"facts":               correlate.Fact{},
+		"repos":               local.Repo{},
+	} {
+		leaf, ok := Lookup(path)
+		if !ok {
+			t.Errorf("%s: not in the catalogue", path)
+			continue
+		}
+		named := make(map[string]bool)
+		for _, f := range slices.Concat(leaf.Fields, leaf.TimeFields, leaf.Identity) {
+			named[f] = true
+		}
+
+		typ := reflect.TypeOf(sample)
+		for i := range typ.NumField() {
+			tag, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+			if tag == "" || tag == "-" {
+				continue
+			}
+			keys, isFlat := flattened[tag]
+			if !isFlat {
+				keys = []string{tag}
+			}
+			for _, key := range keys {
+				if !named[key] {
+					t.Errorf("%s: %s collects %q but the catalogue names no %q",
+						path, typ.Name(), tag, key)
+				}
+			}
+		}
+	}
+}
+
+// TestAgesOnLastCommit pins the nested time this audit flattened. agedOnly
+// type-asserts the value to time.Time, so a field carried as anything else
+// would arm cleanly and then silently match nothing, which is the failure
+// this whole issue is about.
+func TestAgesOnLastCommit(t *testing.T) {
+	now := time.Now()
+	tr := armed("repos", OpAges, Params{Field: "lastCommitAt", OlderThan: "30d"})
+	tr.Standing = true
+
+	fresh := Snapshot{Repos: []local.Repo{
+		{Path: "/r", Name: "r", Last: local.Commit{At: now.Add(-time.Hour)}, ObservedAt: now},
+	}}
+	Evaluate(tr, fresh, now)
+	if fires := Evaluate(tr, fresh, now); len(fires) != 0 {
+		t.Fatalf("a checkout committed to an hour ago aged: %+v", fires)
+	}
+
+	stale := Snapshot{Repos: []local.Repo{
+		{Path: "/r", Name: "r", Last: local.Commit{At: now.Add(-60 * 24 * time.Hour)}, ObservedAt: now},
+	}}
+	if fires := Evaluate(tr, stale, now); len(fires) != 1 {
+		t.Fatalf("got %d fires for a checkout not committed to in two months, want 1", len(fires))
+	}
+}
+
+// TestAgesDefaultsToObservedAt pins the order of the repos TimeFields. ages
+// with no field named falls back to the first one, and that default has to go
+// on meaning "last looked at" rather than "last committed to", or adding a
+// second time field quietly changes what every existing repos watch measures.
+func TestAgesDefaultsToObservedAt(t *testing.T) {
+	now := time.Now()
+	tr := armed("repos", OpAges, Params{OlderThan: "30d"})
+	tr.Standing = true
+
+	// Prime on a checkout that ages under neither field.
+	fresh := Snapshot{Repos: []local.Repo{
+		{Path: "/r", Name: "r", Last: local.Commit{At: now.Add(-time.Hour)}, ObservedAt: now},
+	}}
+	Evaluate(tr, fresh, now)
+
+	// Now committed to two months ago but looked at a moment ago. Under
+	// observedAt this ages not at all; under lastCommitAt it would fire. The
+	// priming above is what makes the difference visible: an entry that aged
+	// before the trigger was primed is already seen and never fires.
+	stale := Snapshot{Repos: []local.Repo{
+		{Path: "/r", Name: "r", Last: local.Commit{At: now.Add(-60 * 24 * time.Hour)}, ObservedAt: now},
+	}}
+	if fires := Evaluate(tr, stale, now); len(fires) != 0 {
+		t.Errorf("ages with no field measured the commit time instead of observedAt: %+v", fires)
+	}
+}
+
+// TestLabelsFilter pins the flattened labels. A where clause compares with
+// fmt.Sprint, so the slice is joined to its names and the existing ~= matches
+// one of them; unjoined it would be compared against Go's formatting of a
+// struct slice, which nobody would write by hand.
+func TestLabelsFilter(t *testing.T) {
+	now := time.Now()
+	match := armed("work.assignedIssues", OpAppears, Params{},
+		Where{Field: "labels", Op: "~=", Value: "bug"})
+	match.Standing = true
+	Evaluate(match, Snapshot{}, now)
+
+	labelled := Snapshot{Issues: []forge.Issue{
+		{Repo: "o/r", Number: 1, Labels: []forge.Label{{Name: "help wanted"}, {Name: "bug"}}},
+	}}
+	if fires := Evaluate(match, labelled, now); len(fires) != 1 {
+		t.Fatalf("got %d fires for an issue labelled bug, want 1", len(fires))
+	}
+
+	// The matching above is not enough on its own: Go formats a raw label
+	// slice as "[{help wanted } {bug }]", which contains "bug" too, so a
+	// filter would pass whether or not the names were ever joined. Pin the
+	// representation itself.
+	entries, ok := labelled.List("work.assignedIssues")
+	if !ok || len(entries) != 1 {
+		t.Fatalf("sampled %d issue entries, want 1", len(entries))
+	}
+	if got := entries[0]["labels"]; got != "help wanted, bug" {
+		t.Errorf("labels sampled as %#v (%T), want the names joined", got, got)
+	}
+
+	miss := armed("work.assignedIssues", OpAppears, Params{},
+		Where{Field: "labels", Op: "~=", Value: "bug"})
+	miss.Standing = true
+	Evaluate(miss, Snapshot{}, now)
+
+	other := Snapshot{Issues: []forge.Issue{
+		{Repo: "o/r", Number: 2, Labels: []forge.Label{{Name: "documentation"}}},
+	}}
+	if fires := Evaluate(miss, other, now); len(fires) != 0 {
+		t.Errorf("an issue labelled documentation matched a bug filter: %+v", fires)
 	}
 }
