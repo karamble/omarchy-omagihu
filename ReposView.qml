@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import qs.Commons
@@ -243,6 +245,11 @@ Column {
     ]
   }
 
+  // A count with thousands grouped, so 1284 stars reads at a glance.
+  function figure(n) {
+    return Number(n || 0).toLocaleString(Qt.locale(), "f", 0)
+  }
+
   // What the clock says, in the order the states matter.
   function clockText(answer) {
     if (answer.paused) return "monitoring is off: these figures cannot update until it is switched back on"
@@ -251,28 +258,41 @@ Column {
     return ""
   }
 
-  // The state lines of the statistics card, from what the daemon returned.
-  function statsLines(answer) {
+  // The grid under the figures, from what the daemon returned. Short values,
+  // so the hero lays them out in two columns.
+  function statsRows(answer) {
     var out = []
     var body = Qt.darker(view.foreground, 1.15)
-    var quiet = Qt.darker(view.foreground, 1.4)
     var st = answer.stats
-    if (st.release) out.push({ text: "release " + st.release + (st.releasedAt ? ", " + view.ago(st.releasedAt) : ""), tone: body })
-    if (st.pushedAt) out.push({ text: "last push " + view.ago(st.pushedAt), tone: quiet })
-    if (st.defaultBranch) out.push({ text: "default branch " + st.defaultBranch, tone: quiet })
-    if (st.license) out.push({ text: "licence " + st.license, tone: quiet })
-    if (st.archived) out.push({ text: "archived", tone: Color.urgent, bold: true })
-    if (st.private) out.push({ text: "private", tone: quiet })
-    if (st.description) out.push({ text: st.description, tone: body })
-    if (answer.stale && answer.error) out.push({ text: "could not refresh: " + answer.error, tone: Color.urgent })
+    if (st.release) out.push({ label: "release", value: st.release + (st.releasedAt ? " · " + view.ago(st.releasedAt) : ""), tone: body })
+    if (st.pushedAt) out.push({ label: "pushed", value: view.ago(st.pushedAt), tone: body })
+    if (st.defaultBranch) out.push({ label: "branch", value: st.defaultBranch, tone: body })
+    if (st.license) out.push({ label: "licence", value: st.license, tone: body })
+    if (st.archived) out.push({ label: "status", value: "archived", tone: Color.urgent, bold: true })
+    if (st.private) out.push({ label: "visibility", value: "private", tone: body })
+    if (answer.stale && answer.error) out.push({ label: "refresh", value: "failed: " + answer.error, tone: Color.urgent })
     return out
   }
 
-  // What a disclosed row says, as cards in a fixed order so every row reads
-  // the same way: statistics, then the facts and their fix and anything
-  // that could not be read, then where the checkout is and how far it
-  // stands from its remotes, then what is in the tree, the last commit and
-  // how old this reading is.
+  // The first half of a row list, for the left column of a two column grid.
+  function leftHalf(rows) { return rows.slice(0, Math.ceil(rows.length / 2)) }
+  function rightHalf(rows) { return rows.slice(Math.ceil(rows.length / 2)) }
+
+  // The counts in the tree, as one line, or clean.
+  function treeText(r) {
+    var work = []
+    var counts = [["staged", r.staged], ["modified", r.modified], ["deleted", r.deleted],
+                  ["untracked", r.untracked], ["conflicted", r.conflicted]]
+    for (var c = 0; c < counts.length; c++) if ((counts[c][1] || 0) > 0) work.push(counts[c][1] + " " + counts[c][0])
+    return work.length > 0 ? work.join(" · ") : "clean"
+  }
+
+  // What a disclosed row says, as sections in a fixed order so every row
+  // reads the same way: the figures, then the facts and their fix and
+  // anything that could not be read, then where the checkout is and how far
+  // it stands from its remotes, then what is in the tree, the last commit
+  // and how old this reading is. A grid section carries label and value
+  // rows; the attention section carries facts, each a summary over a detail.
   function detailSections(e) {
     var out = []
     var body = Qt.darker(view.foreground, 1.15)
@@ -280,70 +300,69 @@ Column {
     var r = e.repo
     var g = e.group
 
-    if (view.hasStats(e)) out.push({ key: "stats", title: "STATISTICS", origin: view.originOf(e), lines: [] })
+    if (view.hasStats(e)) out.push({ key: "stats", title: "STATISTICS", origin: view.originOf(e) })
 
     if (e.kind === "header") {
-      var about = []
-      var what = g.checkouts + " checkouts"
-      if (g.stale > 0) what += " and " + g.stale + " stale registration" + (g.stale === 1 ? "" : "s")
-      about.push({ text: what + " sharing " + g.key, tone: body })
+      var about = [{ label: "git dir", value: g.key, tone: body }]
       for (var m = 0; m < g.members.length; m++) {
         var mem = g.members[m]
         var role = mem.prunable ? "stale" : (mem.main ? "main" : "linked")
-        about.push({ text: role + "  " + mem.name + "  [" + (mem.branch || "?") + "]  " + mem.path, tone: quiet })
+        about.push({ label: role, value: mem.name + "  [" + (mem.branch || "?") + "]  " + mem.path, tone: mem.prunable ? quiet : body })
       }
       var origin = g.remotes || {}
-      for (var rk in origin) about.push({ text: rk + "  " + origin[rk], tone: quiet })
-      out.push({ key: "repository", title: "REPOSITORY", lines: about })
+      for (var rk in origin) about.push({ label: rk, value: origin[rk], tone: body })
+      out.push({ key: "repository", title: "REPOSITORY", rows: about })
       return out
     }
 
     var attention = []
     var drift = view.factsByPath[r.path] || []
+    var worst = quiet
     for (var i = 0; i < drift.length; i++) {
-      attention.push({ text: drift[i].summary, tone: drift[i].severity === "urgent" ? Color.urgent : Color.accent, bold: true })
-      if (drift[i].detail) attention.push({ text: drift[i].detail, tone: body })
+      var urgent = drift[i].severity === "urgent"
+      attention.push({ summary: drift[i].summary, detail: drift[i].detail || "", tone: urgent ? Color.urgent : Color.accent })
+      if (urgent) worst = Color.urgent
+      else if (worst !== Color.urgent) worst = Color.accent
     }
-    if (r.error) attention.push({ text: "could not inspect: " + r.error, tone: Color.urgent, bold: true })
-    if (r.prunable) {
-      attention.push({ text: "stale registration: " + r.prunable, tone: body })
-      attention.push({ text: "git worktree prune clears it", tone: quiet })
-    }
-    if (attention.length > 0) out.push({ key: "attention", title: "ATTENTION", lines: attention })
+    if (r.error) { attention.push({ summary: "could not inspect: " + r.error, detail: "", tone: Color.urgent }); worst = Color.urgent }
+    if (r.prunable) attention.push({ summary: "stale registration: " + r.prunable, detail: "git worktree prune clears it", tone: body })
+    if (attention.length > 0) out.push({ key: "attention", title: "ATTENTION", facts: attention, tone: worst })
 
     var repository = []
     var where = r.path
     if (view.isMulti(g)) where += r.main ? "  (main checkout of " + g.name + ")" : "  (linked worktree of " + g.name + ")"
-    repository.push({ text: where, tone: body })
-    if (r.detached) repository.push({ text: "detached HEAD, on no branch", tone: Color.accent })
+    repository.push({ label: "path", value: where, tone: body })
+    if (r.detached) repository.push({ label: "HEAD", value: "detached, on no branch", tone: Color.accent })
     var remotes = r.remotes || {}
     var names = Object.keys(remotes)
-    if (names.length === 0) repository.push({ text: "no remote", tone: quiet })
-    for (var n = 0; n < names.length; n++) repository.push({ text: names[n] + "  " + remotes[names[n]], tone: quiet })
+    if (names.length === 0) repository.push({ label: "remote", value: "none", tone: quiet })
+    for (var n = 0; n < names.length; n++) repository.push({ label: names[n], value: remotes[names[n]], tone: body })
     if (!r.prunable) {
-      if (r.upstream) repository.push({ text: "ahead " + (r.ahead || 0) + ", behind " + (r.behind || 0) + " of " + r.upstream, tone: quiet })
-      else if (r.noUpstream) repository.push({ text: "no upstream: " + (r.unpushed || 0) + " commits exist only here", tone: quiet })
+      if (r.upstream) {
+        repository.push({ label: "tracking", value: r.upstream + " · ahead " + (r.ahead || 0) + " · behind " + (r.behind || 0), tone: body,
+                          bar: { ahead: r.ahead || 0, behind: r.behind || 0 } })
+      } else if (r.noUpstream) {
+        repository.push({ label: "tracking", value: "no upstream · " + (r.unpushed || 0) + " commits exist only here", tone: body,
+                          bar: { ahead: r.unpushed || 0, behind: 0 } })
+      }
       // The fork-behind fact above already states this distance.
       var saidBehind = false
       for (var b = 0; b < drift.length; b++) if (drift[b].kind === "fork-behind") saidBehind = true
-      if ((r.upstreamBehind || 0) > 0 && !saidBehind) repository.push({ text: r.upstreamBehind + " commits behind upstream/HEAD", tone: quiet })
+      if ((r.upstreamBehind || 0) > 0 && !saidBehind) repository.push({ label: "fork", value: r.upstreamBehind + " commits behind upstream/HEAD", tone: body })
     }
-    out.push({ key: "repository", title: "REPOSITORY", lines: repository })
+    out.push({ key: "repository", title: "REPOSITORY", rows: repository })
     if (r.prunable) return out
 
     var state = []
-    var work = []
-    var counts = [["staged", r.staged], ["modified", r.modified], ["deleted", r.deleted],
-                  ["untracked", r.untracked], ["conflicted", r.conflicted], ["stashed", r.stashes]]
-    for (var c = 0; c < counts.length; c++) if ((counts[c][1] || 0) > 0) work.push(counts[c][1] + " " + counts[c][0])
-    state.push({ text: work.length > 0 ? work.join(", ") : "working tree clean", tone: quiet })
+    state.push({ label: "tree", value: view.treeText(r), tone: r.dirty === true ? body : quiet })
+    if ((r.stashes || 0) > 0) state.push({ label: "stash", value: r.stashes + (r.stashes === 1 ? " entry" : " entries"), tone: body })
     if (r.last && r.last.subject) {
-      var who = r.last.author ? "  " + r.last.author : ""
-      var when = r.last.at ? ", " + view.ago(r.last.at) : ""
-      state.push({ text: "last commit: " + r.last.subject + who + when, tone: quiet })
+      var who = r.last.author ? " · " + r.last.author : ""
+      var when = r.last.at ? " · " + view.ago(r.last.at) : ""
+      state.push({ label: "last commit", value: r.last.subject + who + when, tone: body })
     }
-    state.push({ text: r.observedAt ? "inspected " + view.ago(r.observedAt) : "not inspected yet", tone: quiet })
-    out.push({ key: "state", title: "STATE", lines: state })
+    state.push({ label: "inspected", value: r.observedAt ? view.ago(r.observedAt) : "not yet", tone: quiet })
+    out.push({ key: "state", title: "STATE", rows: state })
     return out
   }
 
@@ -439,6 +458,129 @@ Column {
 
   spacing: Style.space(10)
 
+  // ---------- the pieces a disclosed row is drawn with ----------
+
+  // Labels share one column across every section, so the values line up
+  // down the whole detail and not only inside one card.
+  readonly property int labelColumn: Style.space(84)
+
+  // One headline figure: a large value over a quiet label.
+  component HeroStat: Column {
+    id: stat
+    property string value: ""
+    property string label: ""
+    spacing: 0
+
+    Text {
+      textFormat: Text.PlainText
+      text: stat.value
+      color: view.foreground
+      font.family: view.fontFamily
+      font.pixelSize: Style.font.heading
+      font.bold: true
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      text: stat.label
+      color: Qt.darker(view.foreground, 1.4)
+      font.family: view.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+  }
+
+  // Two counts that share one bar: commits only here against commits only
+  // there, so the distance from the upstream is seen, not only read.
+  component SplitBar: Item {
+    id: split
+    property real ahead: 0
+    property real behind: 0
+    readonly property real total: Math.max(1e-9, split.ahead + split.behind)
+    implicitHeight: Style.space(4)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: height / 2
+      color: Qt.rgba(view.foreground.r, view.foreground.g, view.foreground.b, 0.12)
+    }
+
+    // Both halves fade along the bar, out from their own end, so the two
+    // read as distances from the meeting point and not as two blocks.
+    Rectangle {
+      height: parent.height
+      width: Math.round(parent.width * split.ahead / split.total)
+      radius: height / 2
+      gradient: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0.0; color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 1.0) }
+        GradientStop { position: 1.0; color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45) }
+      }
+    }
+
+    Rectangle {
+      anchors.right: parent.right
+      height: parent.height
+      width: Math.round(parent.width * split.behind / split.total)
+      radius: height / 2
+      gradient: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0.0; color: Qt.rgba(view.foreground.r, view.foreground.g, view.foreground.b, 0.18) }
+        GradientStop { position: 1.0; color: Qt.rgba(view.foreground.r, view.foreground.g, view.foreground.b, 0.45) }
+      }
+    }
+  }
+
+  // One label and value line of the grid. A value that does not fit wraps
+  // under itself rather than eliding, because the end of a path or a remote
+  // is the part that says which one it is. A row that carries a bar draws
+  // it beneath its value.
+  component StatLine: Item {
+    id: line
+    property var row: ({})
+    readonly property bool hasBar: !!line.row.bar && (line.row.bar.ahead + line.row.bar.behind) > 0
+    width: parent ? parent.width : 0
+    implicitHeight: Math.max(lineLabel.implicitHeight, lineValue.implicitHeight)
+                    + (line.hasBar ? Style.space(4) + lineBar.implicitHeight : 0)
+
+    Text {
+      id: lineLabel
+      anchors.left: parent.left
+      anchors.top: parent.top
+      width: view.labelColumn
+      textFormat: Text.PlainText
+      elide: Text.ElideRight
+      text: line.row.label !== undefined ? line.row.label : ""
+      color: Qt.darker(view.foreground, 1.4)
+      font.family: view.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Text {
+      id: lineValue
+      anchors.left: lineLabel.right
+      anchors.right: parent.right
+      anchors.top: parent.top
+      textFormat: Text.PlainText
+      wrapMode: Text.WrapAnywhere
+      text: line.row.value !== undefined ? line.row.value : ""
+      color: line.row.tone !== undefined ? line.row.tone : view.foreground
+      font.family: view.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: line.row.bold === true
+    }
+
+    SplitBar {
+      id: lineBar
+      visible: line.hasBar
+      anchors.left: lineLabel.right
+      anchors.right: parent.right
+      anchors.top: lineValue.bottom
+      anchors.topMargin: Style.space(4)
+      ahead: line.hasBar ? line.row.bar.ahead : 0
+      behind: line.hasBar ? line.row.bar.behind : 0
+    }
+  }
+
   // ---------- the keyboard contract ----------
   //
   // Row zero is the chip strip, whose actions are its chips. Every row after
@@ -500,6 +642,8 @@ Column {
     Repeater {
       model: view.filters
       delegate: Button {
+        required property var modelData
+        required property int index
         Layout.fillWidth: true
         readonly property int n: view.countFor(modelData.key)
         text: modelData.label + " (" + n + ")"
@@ -527,7 +671,10 @@ Column {
     Repeater {
       model: view.rows
       delegate: ListRow {
-        readonly property var entry: modelData
+        id: repoRow
+        required property var modelData
+        required property int index
+        readonly property var entry: repoRow.modelData
         readonly property var repo: entry.repo
         readonly property var group: entry.group
         readonly property bool header: entry.kind === "header"
@@ -580,198 +727,272 @@ Column {
         onActivated: view.activateRow(index + 1, 0)
         onActionTriggered: view.activateRow(index + 1, 1)
 
-        // The cards exist only while the row is disclosed: a collapsed row
-        // costs nothing, however many rows there are.
+        // The detail exists only while the row is disclosed: a collapsed
+        // row costs nothing, however many rows there are.
         detailContent: Loader {
           width: parent.width
-          active: disclosed
+          active: repoRow.disclosed
           sourceComponent: Column {
             width: parent ? parent.width : 0
-            spacing: Style.space(6)
+            spacing: Style.space(8)
 
-            // One card per section, in the order detailSections gives them.
+            // One section per entry, in the order detailSections gives
+            // them, a rule between each pair.
             Repeater {
-              model: view.detailSections(entry)
-              delegate: BorderSurface {
-                id: card
+              model: view.detailSections(repoRow.entry)
+              delegate: Column {
+                id: section
                 required property var modelData
-                readonly property bool statsCard: card.modelData.key === "stats"
-                readonly property var answer: statsCard ? view.owner.statsFor(card.modelData.origin) : null
-                readonly property var figures: answer && answer.stats ? answer.stats : null
+                required property int index
+                readonly property string sectionKey: section.modelData.key
+                readonly property bool statsCard: section.sectionKey === "stats"
+                readonly property var answer: section.statsCard ? view.owner.statsFor(section.modelData.origin) : null
+                readonly property var figures: section.answer && section.answer.stats ? section.answer.stats : null
                 readonly property color body: Qt.darker(view.foreground, 1.15)
                 readonly property color quiet: Qt.darker(view.foreground, 1.4)
+                // The attention section is the one filled surface, in the
+                // tone of its worst fact; every other section sits on the
+                // row.
+                readonly property color sectionTone: section.modelData.tone !== undefined ? section.modelData.tone : section.quiet
+                readonly property bool filled: section.sectionKey === "attention"
                 width: parent.width
-                implicitHeight: cardBody.implicitHeight + Style.space(16)
-                radius: Style.cornerRadius > 0 ? Style.space(6) : 0
-                color: Style.normalFill
-                borderSpec: Border.controlSpec("normal", Qt.darker(view.foreground, 2.5), Color.accent)
+                spacing: Style.space(4)
 
-                Column {
-                  id: cardBody
-                  anchors.top: parent.top
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.margins: Style.space(8)
-                  spacing: Style.space(3)
+                PanelSeparator {
+                  width: parent.width
+                  foreground: view.foreground
+                }
 
-                  PanelSectionHeader {
-                    text: card.modelData.title
-                    foreground: card.quiet
-                    fontFamily: view.fontFamily
-                  }
+                Rectangle {
+                  width: parent.width
+                  implicitHeight: sectionBody.implicitHeight + (section.filled ? Style.space(16) : Style.space(2))
+                  radius: Style.cornerRadius > 0 ? Style.space(6) : 0
+                  color: section.filled ? Qt.rgba(section.sectionTone.r, section.sectionTone.g, section.sectionTone.b, 0.10) : "transparent"
+                  border.width: section.filled ? 1 : 0
+                  border.color: Qt.rgba(section.sectionTone.r, section.sectionTone.g, section.sectionTone.b, 0.35)
 
-                  // ---- the statistics card: figures, then state, then words
-                  Text {
-                    visible: card.statsCard && !card.figures && (!card.answer || card.answer.loading === true)
-                    textFormat: Text.PlainText
-                    text: "asking GitHub"
-                    color: card.quiet
-                    font.family: view.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+                  Column {
+                    id: sectionBody
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.margins: section.filled ? Style.space(8) : 0
+                    anchors.topMargin: section.filled ? Style.space(6) : 0
+                    spacing: Style.space(4)
 
-                  Text {
-                    visible: card.statsCard && !card.figures && !!card.answer && card.answer.loading !== true
-                    width: parent.width
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                    text: card.answer && card.answer.error
-                          ? "GitHub does not show this repository to " + (card.answer.account || "this account")
-                          : "no figures yet"
-                    color: card.body
-                    font.family: view.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+                    // The title line. The statistics clock hangs at its right
+                    // end, and only when there is something to say: reused
+                    // from the cache, held while monitoring is paused, or
+                    // kept after a refresh failed.
+                    Item {
+                      width: parent.width
+                      implicitHeight: title.implicitHeight
 
-                  Text {
-                    visible: card.statsCard && !card.figures && !!card.answer && card.answer.loading !== true && !!card.answer.error
-                    width: parent.width
-                    wrapMode: Text.WrapAnywhere
-                    textFormat: Text.PlainText
-                    text: card.answer ? String(card.answer.error || "") : ""
-                    color: card.quiet
-                    font.family: view.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+                      PanelSectionHeader {
+                        id: title
+                        text: section.modelData.title
+                        foreground: section.filled ? section.sectionTone : view.foreground
+                        color: section.filled ? section.sectionTone : Qt.darker(view.foreground, 1.4)
+                        fontFamily: view.fontFamily
+                      }
 
-                  Flow {
-                    visible: card.statsCard && !!card.figures
-                    width: parent.width
-                    spacing: Style.space(14)
+                      // Which repository the figures belong to: for a fork,
+                      // the fork, which is not what the row's badges are about.
+                      Text {
+                        id: statsRepo
+                        visible: section.statsCard && !!section.figures && !!section.answer.repo
+                        anchors.right: clock.visible ? clock.left : parent.right
+                        anchors.rightMargin: clock.visible ? Style.space(2) : 0
+                        anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText
+                        text: section.answer && section.answer.repo ? String(section.answer.repo) : ""
+                        color: section.quiet
+                        font.family: view.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
 
-                    Repeater {
-                      model: card.figures ? view.statsNumbers(card.figures) : []
-                      delegate: Row {
-                        id: figure
-                        required property var modelData
-                        spacing: Style.space(4)
+                      Item {
+                        id: clock
+                        objectName: "statsClock"
+                        visible: section.statsCard && !!section.answer && section.answer.loading !== true
+                                 && (section.answer.cached === true || section.answer.paused === true || section.answer.stale === true)
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(20)
+                        height: Style.space(20)
 
                         Text {
+                          anchors.centerIn: parent
                           textFormat: Text.PlainText
-                          text: String(figure.modelData.value)
-                          color: view.foreground
+                          text: view.owner.iconClock
+                          color: clockMouse.containsMouse ? Color.accent : section.quiet
                           font.family: view.fontFamily
-                          font.pixelSize: Style.font.bodySmall
+                          font.pixelSize: Style.font.caption
+                        }
+
+                        MouseArea {
+                          id: clockMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                        }
+
+                        PanelToolTip {
+                          objectName: "statsClockTip"
+                          visible: clockMouse.containsMouse
+                          text: section.answer ? view.clockText(section.answer) : ""
+                          fontFamily: view.fontFamily
+                        }
+                      }
+                    }
+
+                    // ---- statistics: the hero. Figures first, then the
+                    // short facts in two columns, then what the repository
+                    // says it is.
+                    Text {
+                      visible: section.statsCard && !section.figures && (!section.answer || section.answer.loading === true)
+                      textFormat: Text.PlainText
+                      text: "asking GitHub"
+                      color: section.quiet
+                      font.family: view.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Text {
+                      visible: section.statsCard && !section.figures && !!section.answer && section.answer.loading !== true
+                      width: parent.width
+                      wrapMode: Text.WordWrap
+                      textFormat: Text.PlainText
+                      text: section.answer && section.answer.error
+                            ? "GitHub does not show this repository to " + (section.answer.account || "this account")
+                            : "no figures yet"
+                      color: section.body
+                      font.family: view.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Text {
+                      visible: section.statsCard && !section.figures && !!section.answer && section.answer.loading !== true && !!section.answer.error
+                      width: parent.width
+                      wrapMode: Text.WrapAnywhere
+                      textFormat: Text.PlainText
+                      text: section.answer ? String(section.answer.error || "") : ""
+                      color: section.quiet
+                      font.family: view.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Row {
+                      visible: section.statsCard && !!section.figures
+                      spacing: Style.space(18)
+
+                      Repeater {
+                        model: section.figures ? view.statsNumbers(section.figures) : []
+                        delegate: HeroStat {
+                          required property var modelData
+                          value: view.figure(modelData.value)
+                          label: modelData.label
+                        }
+                      }
+                    }
+
+                    Item { width: 1; height: Style.space(2); visible: section.statsCard && !!section.figures }
+
+                    Row {
+                      id: statsGrid
+                      visible: section.statsCard && !!section.figures
+                      width: parent.width
+                      spacing: Style.space(20)
+                      readonly property var rows: section.statsCard && section.figures ? view.statsRows(section.answer) : []
+                      readonly property real columnWidth: (statsGrid.width - statsGrid.spacing) / 2
+
+                      Column {
+                        width: statsGrid.columnWidth
+                        spacing: Style.space(3)
+                        Repeater {
+                          model: view.leftHalf(statsGrid.rows)
+                          delegate: StatLine { required property var modelData; row: modelData }
+                        }
+                      }
+
+                      Column {
+                        width: statsGrid.columnWidth
+                        spacing: Style.space(3)
+                        Repeater {
+                          model: view.rightHalf(statsGrid.rows)
+                          delegate: StatLine { required property var modelData; row: modelData }
+                        }
+                      }
+                    }
+
+                    Item { width: 1; height: Style.space(2); visible: section.statsCard && !!section.figures }
+
+                    Text {
+                      visible: section.statsCard && !!section.figures && !!section.figures.description
+                      width: parent.width
+                      wrapMode: Text.WordWrap
+                      textFormat: Text.PlainText
+                      text: section.figures ? String(section.figures.description || "") : ""
+                      color: section.body
+                      font.family: view.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Flow {
+                      visible: section.statsCard && !!section.figures && (section.figures.topics || []).length > 0
+                      width: parent.width
+                      spacing: Style.space(4)
+
+                      Repeater {
+                        model: section.figures ? (section.figures.topics || []) : []
+                        delegate: Badge {
+                          id: topic
+                          required property var modelData
+                          text: String(topic.modelData)
+                          tone: section.quiet
+                          compact: true
+                          fontFamily: view.fontFamily
+                        }
+                      }
+                    }
+
+                    // ---- attention: each fact, a summary over its detail
+                    Repeater {
+                      model: section.modelData.facts || []
+                      delegate: Column {
+                        id: fact
+                        required property var modelData
+                        width: parent.width
+                        spacing: Style.space(1)
+
+                        Text {
+                          width: parent.width
+                          textFormat: Text.PlainText
+                          wrapMode: Text.WordWrap
+                          text: fact.modelData.summary
+                          color: fact.modelData.tone
+                          font.family: view.fontFamily
+                          font.pixelSize: Style.font.caption
                           font.bold: true
                         }
 
                         Text {
-                          anchors.baseline: parent.children[0].baseline
+                          visible: fact.modelData.detail !== ""
+                          width: parent.width
                           textFormat: Text.PlainText
-                          text: figure.modelData.label
-                          color: card.quiet
+                          wrapMode: Text.WordWrap
+                          text: fact.modelData.detail
+                          color: section.body
                           font.family: view.fontFamily
                           font.pixelSize: Style.font.caption
                         }
                       }
                     }
-                  }
 
-                  Repeater {
-                    model: card.statsCard && card.figures ? view.statsLines(card.answer) : []
-                    delegate: Text {
-                      id: statsLine
-                      required property var modelData
-                      width: parent.width
-                      textFormat: Text.PlainText
-                      wrapMode: Text.WordWrap
-                      text: statsLine.modelData.text
-                      color: statsLine.modelData.tone
-                      font.family: view.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.bold: statsLine.modelData.bold === true
-                    }
-                  }
-
-                  Flow {
-                    visible: card.statsCard && !!card.figures && (card.figures.topics || []).length > 0
-                    width: parent.width
-                    spacing: Style.space(4)
-
+                    // ---- repository and state: the grid
                     Repeater {
-                      model: card.figures ? (card.figures.topics || []) : []
-                      delegate: Badge {
-                        id: topic
-                        required property var modelData
-                        text: String(topic.modelData)
-                        tone: card.quiet
-                        compact: true
-                        fontFamily: view.fontFamily
-                      }
+                      model: section.modelData.rows || []
+                      delegate: StatLine { required property var modelData; row: modelData }
                     }
-                  }
-
-                  // ---- every other card: its lines
-                  Repeater {
-                    model: card.modelData.lines
-                    delegate: Text {
-                      id: line
-                      required property var modelData
-                      width: parent.width
-                      textFormat: Text.PlainText
-                      wrapMode: Text.WrapAnywhere
-                      text: line.modelData.text
-                      color: line.modelData.tone
-                      font.family: view.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.bold: line.modelData.bold === true
-                    }
-                  }
-                }
-
-                // The clock says how fresh the figures are, and only when there
-                // is something to say: reused from the cache, held while
-                // monitoring is paused, or kept after a refresh failed.
-                Item {
-                  objectName: "statsClock"
-                  visible: card.statsCard && !!card.answer && card.answer.loading !== true
-                           && (card.answer.cached === true || card.answer.paused === true || card.answer.stale === true)
-                  anchors.top: parent.top
-                  anchors.right: parent.right
-                  anchors.margins: Style.space(6)
-                  width: Style.space(20)
-                  height: Style.space(20)
-
-                  Text {
-                    anchors.centerIn: parent
-                    textFormat: Text.PlainText
-                    text: view.owner.iconClock
-                    color: clockMouse.containsMouse ? Color.accent : card.quiet
-                    font.family: view.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-
-                  MouseArea {
-                    id: clockMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                  }
-
-                  PanelToolTip {
-                    objectName: "statsClockTip"
-                    visible: clockMouse.containsMouse
-                    text: card.answer ? view.clockText(card.answer) : ""
-                    fontFamily: view.fontFamily
                   }
                 }
               }
