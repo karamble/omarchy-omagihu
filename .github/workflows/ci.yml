@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Build and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # `make validate` ends in a QML parse, which needs Qt 6's qmlformat.
+      # qmlformat parses without resolving imports, so it works on a plain
+      # runner. Type checking needs Quickshell and the Omarchy shell, which
+      # is what the qml-lint job is for.
+      - name: Install Qt 6 QML tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-declarative-dev-tools
+
+      - name: Build
+        run: make build
+
+      # The same gate a developer runs locally: vet, gofmt, the race suite
+      # and the QML parse. CI invokes it rather than keeping its own list of
+      # steps that drifts from the Makefile.
+      - name: Validate
+        run: make validate
+
+  plugin:
+    name: Manifest and layout
+    runs-on: ubuntu-latest
+    # `omarchy plugin validate` is the real check, but it needs Omarchy
+    # installed, which a runner does not have. These are the same rules applied
+    # by hand so a broken manifest is caught before anyone installs it.
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Manifest is valid JSON
+        run: jq empty manifest.json
+
+      - name: Manifest has the required fields
+        run: |
+          for field in schemaVersion id name version kinds entryPoints; do
+            jq -e "has(\"$field\")" manifest.json >/dev/null \
+              || { echo "manifest.json is missing: $field"; exit 1; }
+          done
+
+      - name: Every declared entry point exists
+        run: |
+          jq -r '.entryPoints | to_entries[] | .value' manifest.json | while read -r file; do
+            test -f "$file" || { echo "entry point not found: $file"; exit 1; }
+          done
+
+      - name: Each kind has its entry point
+        run: |
+          jq -r '.kinds[]' manifest.json | while read -r kind; do
+            case "$kind" in
+              bar-widget) key=barWidget ;;
+              *)          key="$kind" ;;
+            esac
+            jq -e ".entryPoints | has(\"$key\")" manifest.json >/dev/null \
+              || { echo "kind '$kind' has no entryPoints.$key"; exit 1; }
+          done
+
+      - name: Plugin id is namespaced and not reserved
+        run: |
+          id=$(jq -r .id manifest.json)
+          case "$id" in
+            omarchy.*) echo "omarchy.* is reserved for built-ins"; exit 1 ;;
+            *.*) ;;
+            *) echo "plugin id must be namespaced, e.g. author.plugin"; exit 1 ;;
+          esac
+
+      - name: No symlinks in the plugin folder
+        run: |
+          found=$(find . -path ./.git -prune -o -type l -print)
+          test -z "$found" || { echo "plugin folders may not contain symlinks:"; echo "$found"; exit 1; }
+
+      - name: No long dashes
+        run: |
+          found=$(grep -rlP '\xe2\x80\x94|\xe2\x80\x93' --exclude-dir=.git . || true)
+          test -z "$found" || { echo "em or en dash found in:"; echo "$found"; exit 1; }
+
+  qml-lint:
+    name: QML lint against the shell
+    runs-on: ubuntu-latest
+    # Arch ships both Qt 6 and Quickshell, which these imports need. Ubuntu has
+    # no Quickshell package, so type resolution fails there and every symbol is
+    # reported as unknown.
+    container: archlinux:latest
+    # Not a gate: this pulls the Omarchy shell's default branch, which moves.
+    continue-on-error: true
+    steps:
+      - name: Install Qt 6, Quickshell and git
+        run: pacman -Syu --noconfirm --needed qt6-declarative quickshell git
+
+      - uses: actions/checkout@v5
+        with:
+          path: plugin
+
+      - name: Check out the Omarchy shell
+        uses: actions/checkout@v5
+        with:
+          repository: basecamp/omarchy
+          path: omarchy
+
+      - name: Lint
+        run: |
+          # `import qs.Ui` resolves as <import path>/qs/Ui/qmldir, so the shell
+          # has to be reachable under a directory named `qs`.
+          mkdir -p lintroot
+          ln -sfn "$GITHUB_WORKSPACE/omarchy/shell" lintroot/qs
+          find plugin -name '*.qml' -not -path 'plugin/.git/*' -print0 \
+            | xargs -0 /usr/lib/qt6/bin/qmllint -I lintroot
