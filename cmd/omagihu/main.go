@@ -52,6 +52,8 @@ usage: omagihu <command> [flags]
   disarm <id>      remove an armed watch
   mcp on|off   serve or withdraw the MCP endpoint
   fetch on|off [min]  background fetch of remote refs, and its cadence
+  local-only <path> on|off  a checkout meant to have no remote: stop, or
+                            resume, reporting the missing remote
   recycle      mint a new bearer token, locking out every current client
   notify <domain> on|off   reviews, incoming, reported, broken, inbox, local or reconcile
   clip token|entry         copy the bearer token, or the whole ~/.claude.json
@@ -122,6 +124,20 @@ func run(args []string) error {
 			payload = fmt.Sprintf(`{"enabled":%v,"everyMin":%d}`, positional[0] == "on", minutes)
 		}
 		body, err := post(config, addr, "/api/fetch", payload)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(body)
+		return err
+	case "local-only":
+		if len(positional) < 2 || (positional[1] != "on" && positional[1] != "off") {
+			return errors.New("local-only needs a checkout path and on or off")
+		}
+		payload, err := json.Marshal(map[string]any{"path": positional[0], "on": positional[1] == "on"})
+		if err != nil {
+			return err
+		}
+		body, err := post(config, addr, "/api/local-only", string(payload))
 		if err != nil {
 			return err
 		}

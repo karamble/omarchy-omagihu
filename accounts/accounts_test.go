@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -276,4 +277,44 @@ func TestStoreConcurrentFromCold(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestLocalOnlyRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	store := &Store{}
+	store.SetPath(path)
+	store.SetLocalOnly("/b", true)
+	store.SetLocalOnly("/a", true)
+	store.SetLocalOnly("/a", true)
+	if got := store.LocalOnlyPaths(); !slices.Equal(got, []string{"/a", "/b"}) {
+		t.Fatalf("LocalOnly = %q, want a sorted list with no duplicate", got)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.IsLocalOnly("/a") || !loaded.IsLocalOnly("/b") || loaded.IsLocalOnly("/c") {
+		t.Fatalf("after reload LocalOnly = %q, want /a and /b only", loaded.LocalOnlyPaths())
+	}
+
+	// Unmarking is the same call and survives the same round trip.
+	loaded.SetLocalOnly("/a", false)
+	if err := loaded.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	again, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := again.LocalOnlyPaths(); !slices.Equal(got, []string{"/b"}) {
+		t.Fatalf("after unmarking LocalOnly = %q, want /b only", got)
+	}
+	again.SetLocalOnly("/b", false)
+	if again.LocalOnly != nil {
+		t.Errorf("an emptied list should be nil so the file drops the key, got %q", again.LocalOnly)
+	}
 }

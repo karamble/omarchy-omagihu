@@ -117,10 +117,15 @@ Column {
       "ci-red-on-head": "CI RED HERE",
       "changes-requested": "CHANGES",
       "stale-branch": "MERGED",
-      "fork-behind": "BEHIND"
+      "fork-behind": "BEHIND",
+      "detached-work": "DETACHED WORK",
+      "no-remote": "NO REMOTE",
+      "pr-base-moved": "BASE MOVED"
     }[f.kind] || String(f.kind).toUpperCase()
-    return [{ text: label, tone: f.severity === "urgent" ? Color.urgent : Color.accent,
-              loud: f.severity === "urgent" }]
+    // Detached work is a notice so the bar stays on the local tier, but the
+    // badge shouts, as it does in the repositories view.
+    var loud = f.severity === "urgent" || f.kind === "detached-work"
+    return [{ text: label, tone: loud ? Color.urgent : Color.accent, loud: loud }]
   }
 
   function factIcon(f) {

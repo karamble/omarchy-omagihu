@@ -3,12 +3,16 @@ package api
 import (
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/karamble/omarchy-omagihu/accounts"
+	"github.com/karamble/omarchy-omagihu/correlate"
 	"github.com/karamble/omarchy-omagihu/forge"
 	"github.com/karamble/omarchy-omagihu/local"
 	"github.com/karamble/omarchy-omagihu/poll"
@@ -178,4 +182,120 @@ func TestHealthCountsCheckoutsAndRepositories(t *testing.T) {
 	if h := s.health(remote, dirty); h.Repos != 1 || h.ReposRisk != 0 {
 		t.Errorf("dirty-only: Repos = %d ReposRisk = %d, want 1 and 0", h.Repos, h.ReposRisk)
 	}
+}
+
+// localOnlyServer serves one remote-less, committed checkout at /s that also
+// carries synthetic detached work, so the mark can be shown to silence the
+// missing remote and nothing else.
+func localOnlyServer(t *testing.T) (*Server, *accounts.Store) {
+	t.Helper()
+	store := &accounts.Store{APIToken: "tok"}
+	store.SetPath(filepath.Join(t.TempDir(), "accounts.json"))
+	repos := &local.Snapshot{Repos: []local.Repo{{
+		Name: "scratch", Path: "/s", Branch: "(detached)", Detached: true, Unpushed: 1,
+		Last: local.Commit{SHA: "abc"},
+	}}}
+	s := NewServer(store, fixedPoller{&poll.Snapshot{}}, fixedWatcher{repos}, slog.New(slog.DiscardHandler), "test")
+	return s, store
+}
+
+func factKinds(facts []correlate.Fact) []string {
+	out := []string{}
+	for _, f := range facts {
+		out = append(out, string(f.Kind))
+	}
+	slices.Sort(out)
+	return out
+}
+
+func TestLocalOnlySilencesOnlyTheMissingRemote(t *testing.T) {
+	s, store := localOnlyServer(t)
+
+	if got := factKinds(s.facts()); !slices.Equal(got, []string{"detached-work", "no-remote"}) {
+		t.Fatalf("unmarked kinds = %v, want both facts", got)
+	}
+	store.SetLocalOnly("/s", true)
+	if got := factKinds(s.facts()); !slices.Equal(got, []string{"detached-work"}) {
+		t.Fatalf("marked kinds = %v, want the missing remote silenced and nothing else", got)
+	}
+	store.SetLocalOnly("/s", false)
+	if got := factKinds(s.facts()); !slices.Equal(got, []string{"detached-work", "no-remote"}) {
+		t.Fatalf("unmarked again kinds = %v, want both facts back", got)
+	}
+}
+
+// TestLocalOnlyReachesEveryFactReader is the #10 lesson applied: a mark set
+// through the endpoint must change the dashboard, the alert sample, the facts
+// route and the exported Facts alike, or a trigger and the panel disagree.
+func TestLocalOnlyReachesEveryFactReader(t *testing.T) {
+	s, store := localOnlyServer(t)
+	h := s.Handler()
+
+	call := func(method, path, body string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s %s: %d %s", method, path, rec.Code, rec.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	kindsOf := func(doc map[string]any) []string {
+		out := []string{}
+		for _, f := range doc["facts"].([]any) {
+			out = append(out, f.(map[string]any)["kind"].(string))
+		}
+		slices.Sort(out)
+		return out
+	}
+
+	call(http.MethodPost, "/api/local-only", `{"path":"/s","on":true}`)
+	if !store.IsLocalOnly("/s") {
+		t.Fatal("the endpoint did not mark the checkout")
+	}
+	dash := call(http.MethodGet, "/api/dashboard", "")
+	if got := kindsOf(dash); !slices.Equal(got, []string{"detached-work"}) {
+		t.Errorf("dashboard kinds = %v, want no-remote silenced", got)
+	}
+	if got := dash["localOnly"]; !slices.Equal(anyStrings(got), []string{"/s"}) {
+		t.Errorf("dashboard localOnly = %v, want [/s]", got)
+	}
+	if got := kindsOf(call(http.MethodGet, "/api/facts", "")); !slices.Equal(got, []string{"detached-work"}) {
+		t.Errorf("facts route kinds = %v, want no-remote silenced", got)
+	}
+	if got := factKinds(s.AlertSample().Facts); !slices.Equal(got, []string{"detached-work"}) {
+		t.Errorf("alert sample kinds = %v, want no-remote silenced", got)
+	}
+	if got := factKinds(s.Facts()); !slices.Equal(got, []string{"detached-work"}) {
+		t.Errorf("exported Facts kinds = %v, want no-remote silenced", got)
+	}
+
+	// Lifting the mark goes through the same endpoint and reaches the same
+	// readers.
+	call(http.MethodPost, "/api/local-only", `{"path":"/s","on":false}`)
+	if got := kindsOf(call(http.MethodGet, "/api/dashboard", "")); !slices.Equal(got, []string{"detached-work", "no-remote"}) {
+		t.Errorf("dashboard kinds after unmarking = %v, want both facts back", got)
+	}
+	if got := factKinds(s.AlertSample().Facts); !slices.Equal(got, []string{"detached-work", "no-remote"}) {
+		t.Errorf("alert sample kinds after unmarking = %v, want both facts back", got)
+	}
+	if got := call(http.MethodGet, "/api/dashboard", "")["localOnly"]; !slices.Equal(anyStrings(got), []string{}) {
+		t.Errorf("dashboard localOnly after unmarking = %v, want an empty list, not null", got)
+	}
+}
+
+func anyStrings(v any) []string {
+	out := []string{}
+	if list, ok := v.([]any); ok {
+		for _, s := range list {
+			out = append(out, s.(string))
+		}
+	}
+	return out
 }

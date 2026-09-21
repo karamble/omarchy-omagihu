@@ -220,7 +220,8 @@ func Demo() any {
 			AuthoredIssues: opened,
 			MergedPRs:      []forge.PullRequest{},
 		},
-		Repos: repos,
+		Repos:     repos,
+		LocalOnly: []string{},
 		Accounts: []poll.AccountView{
 			{
 				AccountID: "demo", Login: "you",

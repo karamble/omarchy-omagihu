@@ -88,6 +88,12 @@ type Store struct {
 	// command line and could only be read back by parsing a service file.
 	Roots []string `json:"roots,omitempty"`
 
+	// LocalOnly lists checkouts that are meant to have no remote, so the
+	// missing remote is not reported for them. A plain slice like Roots:
+	// absent and empty both mean nothing is marked, so there is no third
+	// state for a pointer to carry.
+	LocalOnly []string `json:"localOnly,omitempty"`
+
 	// mu guards every field of the store: the API mutates it from concurrent
 	// HTTP handlers (monitoring, notify, roots, token) while the auth
 	// middleware, health handler, alerts engine and notifier read it.
@@ -248,6 +254,35 @@ func (s *Store) SetRoots(roots []string) {
 	s.lock().Lock()
 	defer s.lock().Unlock()
 	s.Roots = slices.Clone(roots)
+}
+
+// LocalOnlyPaths returns the checkouts marked as deliberately local.
+func (s *Store) LocalOnlyPaths() []string {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
+	return slices.Clone(s.LocalOnly)
+}
+
+// IsLocalOnly reports whether a checkout is marked as deliberately local.
+func (s *Store) IsLocalOnly(path string) bool {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
+	return slices.Contains(s.LocalOnly, path)
+}
+
+// SetLocalOnly marks or unmarks a checkout as deliberately local. Marking
+// twice keeps one entry; the list stays sorted so the file is stable.
+func (s *Store) SetLocalOnly(path string, on bool) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
+	s.LocalOnly = slices.DeleteFunc(s.LocalOnly, func(p string) bool { return p == path })
+	if on {
+		s.LocalOnly = append(s.LocalOnly, path)
+		slices.Sort(s.LocalOnly)
+	}
+	if len(s.LocalOnly) == 0 {
+		s.LocalOnly = nil
+	}
 }
 
 // RecycleAPIToken mints a fresh bearer token, invalidating every client that
@@ -440,6 +475,8 @@ func (s *Store) Redacted() *Store {
 		Notify:       s.Notify,
 		FetchEnabled: s.FetchEnabled,
 		FetchMin:     s.FetchMin,
+		Roots:        slices.Clone(s.Roots),
+		LocalOnly:    slices.Clone(s.LocalOnly),
 	}
 	for _, a := range s.Accounts {
 		a.Token = redact(a.Token)

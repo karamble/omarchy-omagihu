@@ -24,6 +24,23 @@ Column {
 
   readonly property var allRepos: snap && snap.repos ? snap.repos : []
   readonly property var facts: snap && snap.facts ? snap.facts : []
+  // Checkouts marked as deliberately local, so the missing remote is not
+  // reported for them.
+  readonly property var localOnly: snap && snap.localOnly ? snap.localOnly : []
+
+  function hasRemote(r) {
+    return !!r.remotes && Object.keys(r.remotes).length > 0
+  }
+
+  function isLocalOnly(r) {
+    return view.localOnly.indexOf(r.path) >= 0
+  }
+
+  // A checkout with no remote has nothing to open, so its action slot is
+  // free to say "this one is fine" and to take it back.
+  function canMark(e) {
+    return e.kind !== "header" && !e.repo.prunable && !view.hasRemote(e.repo)
+  }
 
   // Facts keyed by checkout, so a row can wear the same badge the dashboard
   // shows and the two views never disagree.
@@ -175,6 +192,7 @@ Column {
     if (d > 0) out.push({ text: d + " CHANGED", tone: Qt.lighter(Color.urgent, 1.3) })
     if ((r.behind || 0) > 0) out.push({ text: r.behind + " BEHIND", tone: Qt.darker(view.foreground, 1.3) })
     if ((r.stashes || 0) > 0) out.push({ text: r.stashes + " STASH", tone: Qt.darker(view.foreground, 1.4) })
+    if (view.isLocalOnly(r)) out.push({ text: "LOCAL ONLY", tone: Qt.darker(view.foreground, 1.4) })
     if (out.length === 0) out.push({ text: "CLEAN", tone: view.owner.toneOk })
     return out
   }
@@ -241,7 +259,8 @@ Column {
   function actionCount(row) {
     if (row === 0) return view.filters.length
     var e = view.rows[row - 1]
-    return e && e.kind === "header" ? 2 : 1
+    if (!e) return 1
+    return e.kind === "header" || view.canMark(e) ? 2 : 1
   }
 
   function activateRow(row, action) {
@@ -253,6 +272,10 @@ Column {
     if (!e) return
     if (e.kind === "header" && action === 1) {
       view.toggle(e.group.key)
+      return
+    }
+    if (action === 1 && view.canMark(e)) {
+      view.owner.setLocalOnly(e.repo.path, !view.isLocalOnly(e.repo))
       return
     }
     // A stale registration has no directory, so there is nothing to open.
@@ -325,11 +348,20 @@ Column {
         }
         badges: header ? view.groupBadges(group)
                        : (stale ? [{ text: "STALE", tone: quiet }] : view.repoBadges(repo))
-        actionIcon: header ? (view.isOpen(group) ? view.owner.iconChevronDown : view.owner.iconChevronRight) : ""
+        readonly property bool markable: view.canMark(entry)
+        readonly property bool marked: markable && view.isLocalOnly(repo)
+        actionIcon: {
+          if (header) return view.isOpen(group) ? view.owner.iconChevronDown : view.owner.iconChevronRight
+          if (markable) return marked ? view.owner.iconCross : view.owner.iconCheck
+          return ""
+        }
         actionTone: Color.accent
-        actionTooltip: header
-          ? (view.isOpen(group) ? "Collapse" : "Show " + group.members.length + " checkouts")
-          : ""
+        actionTooltip: {
+          if (header) return view.isOpen(group) ? "Collapse" : "Show " + group.members.length + " checkouts"
+          if (marked) return "Report the missing remote again"
+          if (markable) return "No remote wanted: stop reporting it"
+          return ""
+        }
         onActivated: view.activateRow(index + 1, 0)
         onActionTriggered: view.activateRow(index + 1, 1)
       }

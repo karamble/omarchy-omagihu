@@ -167,6 +167,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/fetch", s.handleFetchToggle)
 	mux.HandleFunc("POST /api/roots", s.handleRoots)
+	mux.HandleFunc("POST /api/local-only", s.handleLocalOnly)
 	mux.HandleFunc("POST /api/token/recycle", s.handleRecycleToken)
 
 	// The MCP endpoint is checked per request rather than mounted once, so the
@@ -389,6 +390,9 @@ type dashboardResponse struct {
 	Work      workResponse         `json:"work"`
 	Repos     []local.Repo         `json:"repos"`
 	Accounts  []poll.AccountView   `json:"accounts"`
+	// LocalOnly is the checkouts marked as deliberately local, so a row can
+	// show the mark and offer to lift it.
+	LocalOnly []string `json:"localOnly"`
 }
 
 // handleDashboard serves the landing view: what is waiting, what is in flight,
@@ -399,7 +403,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	work := s.mergedWork(remote)
 	inbox := s.mergedInbox(remote)
-	facts := correlate.Correlate(remote, repos)
+	facts := s.correlate(remote, repos)
 
 	resp := dashboardResponse{
 		Health: s.health(remote, repos),
@@ -410,14 +414,50 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			Repos:    repos.Repos,
 			Facts:    facts,
 		}),
-		Inbox:    inbox,
-		Facts:    facts,
-		Alerts:   s.alertRows(),
-		Work:     work,
-		Repos:    repos.Repos,
-		Accounts: remote.Accounts,
+		Inbox:     inbox,
+		Facts:     facts,
+		Alerts:    s.alertRows(),
+		Work:      work,
+		Repos:     repos.Repos,
+		Accounts:  remote.Accounts,
+		LocalOnly: s.localOnly(),
 	}
 	writeJSON(w, s.logger, http.StatusOK, resp)
+}
+
+// localOnly is the marked list as JSON wants it: a list, never null.
+func (s *Server) localOnly() []string {
+	if marked := s.store.LocalOnlyPaths(); marked != nil {
+		return marked
+	}
+	return []string{}
+}
+
+// handleLocalOnly marks or unmarks one checkout as deliberately local. The
+// mark only silences the no-remote fact; everything else about the checkout
+// is still reported.
+func (s *Server) handleLocalOnly(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path string `json:"path"`
+		On   *bool  `json:"on"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil ||
+		strings.TrimSpace(body.Path) == "" || body.On == nil {
+		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
+			"error": `body must carry "path" and "on"`,
+		})
+		return
+	}
+	s.store.SetLocalOnly(strings.TrimSpace(body.Path), *body.On)
+	if err := s.store.Save(); err != nil {
+		s.logger.Error("persisting local-only list", "err", err)
+		writeJSON(w, s.logger, http.StatusInternalServerError, map[string]string{
+			"error": "could not persist the setting",
+		})
+		return
+	}
+	s.logger.Info("local-only changed", "path", body.Path, "on", *body.On)
+	writeJSON(w, s.logger, http.StatusOK, map[string]any{"localOnly": s.localOnly()})
 }
 
 // handleMonitoring is the master switch. Off means the daemon stops polling
@@ -559,7 +599,15 @@ func (s *Server) handleFetchToggle(w http.ResponseWriter, r *http.Request) {
 // facts joins the two planes. It is cheap: both snapshots are already in
 // memory, so this is a walk over what has been polled, not a fetch.
 func (s *Server) facts() []correlate.Fact {
-	return correlate.Correlate(s.poller.Snapshot(), s.watcher.Snapshot())
+	return s.correlate(s.poller.Snapshot(), s.watcher.Snapshot())
+}
+
+// correlate is the one place facts are built, so the dashboard, the alert
+// sample, the notifier and the MCP surface all apply the same marks.
+func (s *Server) correlate(remote *poll.Snapshot, repos *local.Snapshot) []correlate.Fact {
+	return correlate.CorrelateWith(remote, repos, correlate.Options{
+		DeliberatelyLocal: func(r local.Repo) bool { return s.store.IsLocalOnly(r.Path) },
+	})
 }
 
 // SetEngine hands the API the alert engine once it exists.
@@ -575,7 +623,7 @@ func (s *Server) AlertSample() alerts.Snapshot {
 	work := s.mergedWork(remote)
 	health := s.health(remote, repos)
 	inbox := s.mergedInbox(remote)
-	facts := correlate.Correlate(remote, repos)
+	facts := s.correlate(remote, repos)
 
 	return alerts.Snapshot{
 		Attention: attention.Resolve(attention.Input{

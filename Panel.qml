@@ -296,6 +296,14 @@ Panel {
     controlProc.running = true
   }
 
+  // A checkout that is meant to have no remote is marked from its own row,
+  // and unmarked from the same place.
+  function setLocalOnly(path, on) {
+    if (controlProc.running) return
+    controlProc.args = ["local-only", String(path), on ? "on" : "off", "--addr", root.addr]
+    controlProc.running = true
+  }
+
   function setMCP(on) {
     if (controlProc.running) return
     controlProc.args = ["mcp", on ? "on" : "off", "--addr", root.addr]
