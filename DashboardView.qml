@@ -247,17 +247,22 @@ Column {
       model: view.filters
       delegate: Button {
         readonly property bool hidden: view.isHidden(modelData.key)
+        // The chip's own hue: red while its section holds urgent work.
+        readonly property color hue: modelData.urgent ? Color.urgent : Color.accent
         Layout.fillWidth: true
-        // A shown chip keeps its border and its own colour; a folded one
-        // drops the border and dims, but keeps its count, so what is being
-        // suppressed stays visible, and keeps red when the section it hides
-        // holds urgent work. The theme's selected fill is not used: it
-        // would paint an urgent chip in the theme's colour, not in red.
+        // Lit means shown, hue means urgent, and the two never mix: a lit
+        // chip fills with its own hue at the theme's selected alpha, a
+        // folded one is unlit but keeps its hue and its count, so a folded
+        // section with urgent work still reads red. The fill goes through
+        // background rather than selected because the theme's selected
+        // colour token picks one colour for every chip and would paint an
+        // urgent chip in the theme's choice.
         text: modelData.label + " (" + modelData.count + ")"
         hasCursor: view.owner.cursor === 0 && view.owner.actionIndex === index
-        bordered: !hidden
-        foreground: modelData.urgent ? Color.urgent : (hidden ? Qt.darker(view.foreground, 1.4) : view.foreground)
-        accent: modelData.urgent ? Color.urgent : Color.accent
+        bordered: true
+        background: hidden ? "transparent" : Qt.rgba(hue.r, hue.g, hue.b, Style.selectedFillAlpha)
+        foreground: hue
+        accent: hue
         fontFamily: view.fontFamily
         fontSize: Style.font.caption
         horizontalPadding: Style.space(8)
