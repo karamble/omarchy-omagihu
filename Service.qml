@@ -36,9 +36,46 @@ Item {
   readonly property int maxRestarts: 5
   property int restarts: 0
   property string lastError: ""
+  // Why the daemon last died. An exit code says a process failed; it never
+  // says the port was already taken, which is the usual cause and the one
+  // thing the daemon itself states outright.
+  property string exitReason: ""
 
   function backoffMs() {
     return Math.min(30000, 1000 * Math.pow(2, root.restarts))
+  }
+
+  // The daemon logs to stderr as well as failing on it, so the first line is
+  // a startup record and the reason is the last thing written. Structured
+  // records are skipped rather than the last line taken blindly, so a warning
+  // logged after the failure cannot hide it.
+  function failureLine(text) {
+    var lines = String(text || "").split("\n")
+    var reason = ""
+    var lastAny = ""
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim()
+      if (line === "") continue
+      lastAny = line
+      if (/(^|\s)level=(INFO|DEBUG)(\s|$)/.test(line)) continue
+      reason = line
+    }
+    return reason !== "" ? reason : lastAny
+  }
+
+  // What the panel shows: the reason when the daemon gave one, the exit code
+  // when it did not, and what happens next either way. Rebuilt rather than
+  // written once, because stderr can finish either side of the exit handler
+  // and whichever arrives second must not flatten what the first said.
+  property int lastExitCode: 0
+  property bool gaveUp: false
+
+  function refreshError() {
+    if (root.lastExitCode === 0) return
+    var tail = root.gaveUp ? "; not restarting again" : ", restarting"
+    root.lastError = root.exitReason !== ""
+      ? "the daemon exited: " + root.exitReason + tail
+      : "the daemon exited with " + root.lastExitCode + tail
   }
 
   // Passed to every child, built once so the two cannot drift.
@@ -91,18 +128,32 @@ Item {
     clearEnvironment: true
     environment: root.childEnv
 
+    // Without this the reason was thrown away at the source and the panel
+    // could only ever report an exit code.
+    stderr: StdioCollector {
+      waitForEnd: false
+      onStreamFinished: {
+        var reason = root.failureLine(text)
+        if (reason === "") return
+        root.exitReason = reason
+        root.refreshError()
+      }
+    }
 
     onExited: function (code, status) {
       // A clean exit is the daemon being told to stop, which happens when this
       // object is going away. Nothing to do then.
       if (code === 0) return
+      root.lastExitCode = code
       if (root.restarts >= root.maxRestarts) {
-        root.lastError = "the daemon keeps exiting (" + code + "); not restarting again"
+        root.gaveUp = true
+        root.refreshError()
         console.warn("omagihu: " + root.lastError)
         return
       }
       root.restarts++
-      root.lastError = "daemon exited with " + code + ", restarting"
+      root.gaveUp = false
+      root.refreshError()
       restartTimer.interval = root.backoffMs()
       restartTimer.restart()
     }
