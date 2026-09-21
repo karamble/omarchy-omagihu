@@ -18,9 +18,9 @@ Column {
   property string filter: "risk"
   // Group keys the user has opened.
   property var expanded: ({})
-  // Rows whose folded badges are shown. A look, not a setting: it lives as
-  // long as the view does, like expanded.
-  property var badgesOpen: ({})
+  // Rows that are disclosed. A look, not a setting: it lives as long as the
+  // view does, like expanded.
+  property var disclosed: ({})
   readonly property int badgeCap: 4
 
   readonly property color foreground: owner.foreground
@@ -151,11 +151,11 @@ Column {
     return e.kind === "header" ? "group:" + e.group.key : e.repo.path
   }
 
-  function toggleBadges(key) {
+  function toggleDisclosure(key) {
     var o = ({})
-    for (var k in view.badgesOpen) o[k] = view.badgesOpen[k]
+    for (var k in view.disclosed) o[k] = view.disclosed[k]
     o[key] = !o[key]
-    view.badgesOpen = o
+    view.disclosed = o
   }
 
   function rowBadges(e) {
@@ -164,13 +164,91 @@ Column {
     return view.repoBadges(e.repo)
   }
 
-  function overflows(e) {
-    return view.rowBadges(e).length > view.badgeCap
+  // The trailing slot holds one action, by priority: a header's chevron, a
+  // remote-less checkout's mark, otherwise opening the remote. A stale
+  // registration has no directory and gets none.
+  function hasTrailing(e) {
+    if (e.kind === "header" || view.canMark(e)) return true
+    return !e.repo.prunable && view.remoteUrl(e.repo) !== ""
   }
 
-  // The trailing slot: a header's chevron or a remote-less checkout's mark.
-  function hasTrailing(e) {
-    return e.kind === "header" || view.canMark(e)
+  function ago(iso) {
+    if (!iso) return ""
+    var then = Date.parse(iso)
+    if (isNaN(then)) return ""
+    var secs = Math.max(0, Math.round((Date.now() - then) / 1000))
+    if (secs < 60) return secs + "s ago"
+    if (secs < 3600) return Math.round(secs / 60) + "m ago"
+    if (secs < 86400) return Math.round(secs / 3600) + "h ago"
+    return Math.round(secs / 86400) + "d ago"
+  }
+
+  // What a disclosed row says, in the order a person acts on it: the facts
+  // and their fix first, then anything that could not be read, then where
+  // the checkout is, how far it stands from its remotes, what is in the
+  // tree, the last commit, and how old this reading is.
+  function detailLines(e) {
+    var out = []
+    var body = Qt.darker(view.foreground, 1.15)
+    var quiet = Qt.darker(view.foreground, 1.4)
+    var r = e.repo
+    var g = e.group
+
+    if (e.kind === "header") {
+      var what = g.checkouts + " checkouts"
+      if (g.stale > 0) what += " and " + g.stale + " stale registration" + (g.stale === 1 ? "" : "s")
+      out.push({ text: what + " sharing " + g.key, tone: body })
+      for (var m = 0; m < g.members.length; m++) {
+        var mem = g.members[m]
+        var role = mem.prunable ? "stale" : (mem.main ? "main" : "linked")
+        out.push({ text: role + "  " + mem.name + "  [" + (mem.branch || "?") + "]  " + mem.path, tone: quiet })
+      }
+      var origin = g.remotes || {}
+      for (var rk in origin) out.push({ text: rk + "  " + origin[rk], tone: quiet })
+      return out
+    }
+
+    var drift = view.factsByPath[r.path] || []
+    for (var i = 0; i < drift.length; i++) {
+      out.push({ text: drift[i].summary, tone: drift[i].severity === "urgent" ? Color.urgent : Color.accent, bold: true })
+      if (drift[i].detail) out.push({ text: drift[i].detail, tone: body })
+    }
+    if (r.error) out.push({ text: "could not inspect: " + r.error, tone: Color.urgent, bold: true })
+    if (r.prunable) {
+      out.push({ text: "stale registration: " + r.prunable, tone: body })
+      out.push({ text: "git worktree prune clears it", tone: quiet })
+    }
+
+    var where = r.path
+    if (view.isMulti(g)) where += r.main ? "  (main checkout of " + g.name + ")" : "  (linked worktree of " + g.name + ")"
+    out.push({ text: where, tone: body })
+    if (r.detached) out.push({ text: "detached HEAD, on no branch", tone: Color.accent })
+    var remotes = r.remotes || {}
+    var names = Object.keys(remotes)
+    if (names.length === 0) out.push({ text: "no remote", tone: quiet })
+    for (var n = 0; n < names.length; n++) out.push({ text: names[n] + "  " + remotes[names[n]], tone: quiet })
+    if (r.prunable) return out
+
+    if (r.upstream) out.push({ text: "ahead " + (r.ahead || 0) + ", behind " + (r.behind || 0) + " of " + r.upstream, tone: quiet })
+    else if (r.noUpstream) out.push({ text: "no upstream: " + (r.unpushed || 0) + " commits exist only here", tone: quiet })
+    // The fork-behind fact above already states this distance.
+    var saidBehind = false
+    for (var b = 0; b < drift.length; b++) if (drift[b].kind === "fork-behind") saidBehind = true
+    if ((r.upstreamBehind || 0) > 0 && !saidBehind) out.push({ text: r.upstreamBehind + " commits behind upstream/HEAD", tone: quiet })
+
+    var work = []
+    var counts = [["staged", r.staged], ["modified", r.modified], ["deleted", r.deleted],
+                  ["untracked", r.untracked], ["conflicted", r.conflicted], ["stashed", r.stashes]]
+    for (var c = 0; c < counts.length; c++) if ((counts[c][1] || 0) > 0) work.push(counts[c][1] + " " + counts[c][0])
+    out.push({ text: work.length > 0 ? work.join(", ") : "working tree clean", tone: quiet })
+
+    if (r.last && r.last.subject) {
+      var who = r.last.author ? "  " + r.last.author : ""
+      var when = r.last.at ? ", " + view.ago(r.last.at) : ""
+      out.push({ text: "last commit: " + r.last.subject + who + when, tone: quiet })
+    }
+    out.push({ text: r.observedAt ? "inspected " + view.ago(r.observedAt) : "not inspected yet", tone: quiet })
+    return out
   }
 
   // The rows the list draws, one entry each: a plain repository, a group
@@ -268,10 +346,12 @@ Column {
   // ---------- the keyboard contract ----------
   //
   // Row zero is the chip strip, whose actions are its chips. Every row after
-  // it is an entry of view.rows: a plain repository or a checkout opens its
-  // remote; a group header opens the remote too and carries a second action,
-  // the chevron, which expands or collapses it. Expanding inserts the
-  // checkouts as rows right after the header, so everything below shifts.
+  // it is an entry of view.rows. Its first action discloses it: the card
+  // opens to show the folded badges and the checkout's detail. Its second,
+  // when it has one, is the row's one contextual verb: a header's chevron,
+  // which expands the repository into its checkouts as rows right after it
+  // so everything below shifts; a remote-less checkout's mark; or opening
+  // the remote.
   readonly property var filters: [
     { key: "risk", label: "At risk", urgent: false },
     { key: "dirty", label: "Dirty", urgent: false },
@@ -282,13 +362,13 @@ Column {
   readonly property int rowCount: 1 + view.rows.length
   readonly property bool formFocused: false
 
-  // Actions on a row: the row itself, then the trailing action when there is
-  // one, then the badge fold when the row overflows.
+  // Actions on a row: the row itself discloses; the trailing action, when
+  // there is one, is the row's one contextual verb.
   function actionCount(row) {
     if (row === 0) return view.filters.length
     var e = view.rows[row - 1]
     if (!e) return 1
-    return 1 + (view.hasTrailing(e) ? 1 : 0) + (view.overflows(e) ? 1 : 0)
+    return 1 + (view.hasTrailing(e) ? 1 : 0)
   }
 
   function activateRow(row, action) {
@@ -298,16 +378,15 @@ Column {
     }
     var e = view.rows[row - 1]
     if (!e) return
-    var trailing = view.hasTrailing(e)
-    if (action === (trailing ? 2 : 1) && view.overflows(e)) {
-      view.toggleBadges(view.rowKey(e))
+    if (action === 0) {
+      view.toggleDisclosure(view.rowKey(e))
       return
     }
-    if (e.kind === "header" && action === 1) {
+    if (e.kind === "header") {
       view.toggle(e.group.key)
       return
     }
-    if (action === 1 && view.canMark(e)) {
+    if (view.canMark(e)) {
       view.owner.setLocalOnly(e.repo.path, !view.isLocalOnly(e.repo))
       return
     }
@@ -381,13 +460,17 @@ Column {
         }
         badges: view.rowBadges(entry)
         maxBadges: view.badgeCap
-        badgesExpanded: view.badgesOpen[view.rowKey(entry)] === true
-        onOverflowTriggered: view.toggleBadges(view.rowKey(entry))
+        disclosable: true
+        disclosed: view.disclosed[view.rowKey(entry)] === true
+        discloseIcon: view.owner.iconCaretRight
+        discloseOpenIcon: view.owner.iconCaretDown
         readonly property bool markable: view.canMark(entry)
         readonly property bool marked: markable && view.isLocalOnly(repo)
+        readonly property bool openable: !header && !markable && view.hasTrailing(entry)
         actionIcon: {
           if (header) return view.isOpen(group) ? view.owner.iconChevronDown : view.owner.iconChevronRight
           if (markable) return marked ? view.owner.iconCross : view.owner.iconCheck
+          if (openable) return view.owner.iconOpen
           return ""
         }
         actionTone: Color.accent
@@ -395,10 +478,32 @@ Column {
           if (header) return view.isOpen(group) ? "Collapse" : "Show " + group.members.length + " checkouts"
           if (marked) return "Report the missing remote again"
           if (markable) return "No remote wanted: stop reporting it"
+          if (openable) return "Open on GitHub"
           return ""
         }
         onActivated: view.activateRow(index + 1, 0)
         onActionTriggered: view.activateRow(index + 1, 1)
+
+        detailContent: Column {
+          width: parent.width
+          spacing: Style.space(3)
+
+          Repeater {
+            model: view.detailLines(entry)
+            delegate: Text {
+              id: line
+              required property var modelData
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WrapAnywhere
+              text: line.modelData.text
+              color: line.modelData.tone
+              font.family: view.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: line.modelData.bold === true
+            }
+          }
+        }
       }
     }
 

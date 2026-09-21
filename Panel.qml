@@ -174,6 +174,9 @@ Panel {
   readonly property string iconTrash: ""
   readonly property string iconChevronRight: ""
   readonly property string iconChevronDown: ""
+  readonly property string iconCaretRight: ""
+  readonly property string iconCaretDown: ""
+  readonly property string iconOpen: ""
 
   // Green is not in the theme palette, and "passing" needs to read as distinct
   // from the accent colour used for merely informational rows.
