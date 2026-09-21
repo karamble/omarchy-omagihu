@@ -171,6 +171,11 @@ func deliverHerdr(ctx context.Context, target, text string) error {
 		last = fmt.Errorf("herdr agent prompt %s: %w: %s",
 			target, err, strings.TrimSpace(string(out)))
 
+		// The budget is for an agent that is busy now and free in a moment.
+		// A failure that cannot improve is answered at once.
+		if permanentHerdrFailure(err, out) {
+			return last
+		}
 		if time.Now().After(deadline) {
 			return last
 		}
@@ -180,6 +185,34 @@ func deliverHerdr(ctx context.Context, target, text string) error {
 		case <-time.After(retryEvery):
 		}
 	}
+}
+
+// herdrErrorCode reads the code herdr puts in its JSON reply when it refuses,
+// or "" when the output is not that shape.
+func herdrErrorCode(out []byte) string {
+	var reply struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &reply); err != nil {
+		return ""
+	}
+	return reply.Error.Code
+}
+
+// permanentHerdrFailure reports a failure that waiting cannot fix: no herdr
+// binary at all, or herdr refusing for any reason other than the agent
+// being busy. Busy is agent_blocked, the one refusal that passes; a pane
+// that is gone is agent_not_found and stays gone. A failure with no
+// structured answer, herdr crashing or not answering, keeps the budget,
+// since retrying is the only thing that can help there.
+func permanentHerdrFailure(err error, out []byte) bool {
+	if errors.Is(err, exec.ErrNotFound) {
+		return true
+	}
+	code := herdrErrorCode(out)
+	return code != "" && code != "agent_blocked"
 }
 
 // agentForRepo finds the agent whose working directory sits inside the checkout

@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,4 +164,105 @@ func swapRetryBudget(budget, every time.Duration) func() {
 	oldBudget, oldEvery := blockedRetry, retryEvery
 	blockedRetry, retryEvery = budget, every
 	return func() { blockedRetry, retryEvery = oldBudget, oldEvery }
+}
+
+// fakeHerdr installs a herdr on PATH that prints reply and exits with code,
+// counting its invocations in a file the test reads back.
+func fakeHerdr(t *testing.T, reply string, code int) func() int {
+	t.Helper()
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\necho x >> " + counter + "\nprintf '%s' '" + reply + "'\nexit " + fmt.Sprint(code) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "herdr"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return func() int {
+		raw, err := os.ReadFile(counter)
+		if err != nil {
+			return 0
+		}
+		return strings.Count(string(raw), "x")
+	}
+}
+
+// TestMissingHerdrFallsBackAtOnce keeps the real budget in place: a binary
+// that is not there is answered without a single retry, so the test would
+// take a minute if the loop still waited.
+func TestMissingHerdrFallsBackAtOnce(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	notified := 0
+	deliver := NewDeliverer(context.Background(), func(urgency, title, body string) error {
+		notified++
+		return nil
+	})
+
+	start := time.Now()
+	channel, err := deliver(Trigger{ID: "t1", DeliverTo: "w1:p1"}, Fire{Summary: "s"})
+	if elapsed := time.Since(start); elapsed >= retryEvery {
+		t.Fatalf("a missing herdr took %v to give up, want no retry at all", elapsed)
+	}
+	if err != nil || channel != "desktop" || notified != 1 {
+		t.Fatalf("channel %q, err %v, %d desktop notifications; want desktop, nil, 1", channel, err, notified)
+	}
+}
+
+// TestGonePaneIsNotRetried: herdr answers agent_not_found for a pane that no
+// longer exists, and that is asked exactly once.
+func TestGonePaneIsNotRetried(t *testing.T) {
+	defer swapRetryBudget(200*time.Millisecond, 10*time.Millisecond)()
+	calls := fakeHerdr(t, `{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"},"id":"cli:agent:prompt"}`, 1)
+
+	notified := 0
+	deliver := NewDeliverer(context.Background(), func(urgency, title, body string) error {
+		notified++
+		return nil
+	})
+	channel, err := deliver(Trigger{ID: "t1", DeliverTo: "w1:p1"}, Fire{Summary: "s"})
+	if err != nil || channel != "desktop" || notified != 1 {
+		t.Fatalf("channel %q, err %v, %d desktop notifications; want desktop, nil, 1", channel, err, notified)
+	}
+	if n := calls(); n != 1 {
+		t.Fatalf("herdr was asked %d times about a pane that is gone, want 1", n)
+	}
+}
+
+// TestBusyAgentKeepsTheFullBudget is the other half: agent_blocked means busy
+// now and free in a moment, so the loop keeps asking until the budget ends.
+func TestBusyAgentKeepsTheFullBudget(t *testing.T) {
+	defer swapRetryBudget(60*time.Millisecond, 10*time.Millisecond)()
+	calls := fakeHerdr(t, `{"error":{"code":"agent_blocked","message":"agent w1:p1 is waiting at a dialog"},"id":"cli:agent:prompt"}`, 1)
+
+	notified := 0
+	deliver := NewDeliverer(context.Background(), func(urgency, title, body string) error {
+		notified++
+		return nil
+	})
+	start := time.Now()
+	channel, err := deliver(Trigger{ID: "t1", DeliverTo: "w1:p1"}, Fire{Summary: "s"})
+	elapsed := time.Since(start)
+	if err != nil || channel != "desktop" || notified != 1 {
+		t.Fatalf("channel %q, err %v, %d desktop notifications; want desktop, nil, 1", channel, err, notified)
+	}
+	if elapsed < blockedRetry {
+		t.Fatalf("a busy agent was given up on after %v, want the full %v", elapsed, blockedRetry)
+	}
+	if n := calls(); n < 3 {
+		t.Fatalf("herdr was asked %d times about a busy agent, want it asked again and again", n)
+	}
+}
+
+// An answer with no structured code, herdr crashing or saying something the
+// loop does not know, is still retried: waiting is the only thing that can
+// help there.
+func TestUnstructuredFailureKeepsTheBudget(t *testing.T) {
+	defer swapRetryBudget(60*time.Millisecond, 10*time.Millisecond)()
+	calls := fakeHerdr(t, "connection refused", 1)
+	deliver := NewDeliverer(context.Background(), func(urgency, title, body string) error { return nil })
+	if _, err := deliver(Trigger{ID: "t1", DeliverTo: "w1:p1"}, Fire{Summary: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := calls(); n < 3 {
+		t.Fatalf("herdr was asked %d times after an unstructured failure, want the budget spent", n)
+	}
 }
