@@ -874,6 +874,7 @@ func TestWorkDecodesOrganizations(t *testing.T) {
 	}{
 		{"read:org sees everything", "repo, read:org", false},
 		{"admin:org contains read:org", "admin:org", false},
+		{"write:org contains read:org", "write:org", false},
 		{"no org scope hides private memberships", "repo, read:user", true},
 		{"a fine-grained token sends no scopes and is trusted", "", false},
 	} {

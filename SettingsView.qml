@@ -691,6 +691,12 @@ Column {
           if (modelData.workError) bits.push("work error: " + modelData.workError)
           // A partial answer is not an error: the poll succeeded with holes.
           if (modelData.workPartial) bits.push("partial answer: " + modelData.workPartial)
+          // Nor is this one. The poll succeeded and the token is the limit:
+          // without read:org only public memberships come back, so a private
+          // one reads as an organisation you do not belong to and its
+          // repositories are marked followed.
+          if (modelData.orgsHidden)
+            bits.push("organisations incomplete: the token has no read:org scope")
           return line + "  ·  " + bits.join(" · ")
         }
         color: (modelData.inboxError || modelData.workError) ? Color.urgent : view.body

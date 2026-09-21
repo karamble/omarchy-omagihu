@@ -1149,3 +1149,81 @@ func TestRunKeepsOrganizationsWhenUnresolved(t *testing.T) {
 		t.Errorf("Organizations = %v after an unresolved answer, want the previous list kept", v.Organizations)
 	}
 }
+
+// TestRunCarriesOrgsHidden pins that the scope verdict reaches the view. The
+// forge layer works it out from the response header, and before this it was
+// computed and then dropped, so nothing downstream could say the organisation
+// list was short.
+func TestRunCarriesOrgsHidden(t *testing.T) {
+	fake := newFake("a")
+	fake.setWork(forge.Workload{Login: "a", Organizations: []string{"decred"}, OrgsHidden: true})
+	p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go p.Run(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		v := p.Snapshot().Accounts[0]
+		if v.OrgsHidden {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("OrgsHidden never reached the view: %+v", v)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestRunUpdatesOrgsHiddenWhenOrganizationsUnresolved pins the asymmetry with
+// the list above it. The list is kept when a cycle fails to deliver it, but
+// the verdict is not part of the document: it is read off the response header,
+// so an answer that arrived at all carries a current one. Holding it back with
+// the list would leave a stale verdict about a token that had been replaced.
+func TestRunUpdatesOrgsHiddenWhenOrganizationsUnresolved(t *testing.T) {
+	fake := newFake("a")
+	fake.setWork(forge.Workload{Login: "a", Organizations: []string{"decred"}})
+	p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go p.Run(ctx)
+
+	wait := func(ready func(AccountView) bool) AccountView {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			v := p.Snapshot().Accounts[0]
+			if ready(v) {
+				return v
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("view never reached the expected state: %+v", v)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	wait(func(v AccountView) bool { return len(v.Organizations) == 1 })
+
+	fake.setWork(forge.Workload{Login: "a", Organizations: []string{}, OrgsHidden: true,
+		Warnings: []string{"nope"}, Unresolved: []string{"organizations"}})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.Wake()
+		if _, work := fake.calls(); work >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the work loop did not poll again")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	v := wait(func(v AccountView) bool { return v.WorkPartial != "" })
+	if !slices.Equal(v.Organizations, []string{"decred"}) {
+		t.Errorf("Organizations = %v after an unresolved answer, want the previous list kept", v.Organizations)
+	}
+	if !v.OrgsHidden {
+		t.Error("OrgsHidden = false after an unresolved answer, want the header's verdict applied anyway")
+	}
+}

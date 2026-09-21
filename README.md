@@ -93,6 +93,29 @@ bin/omagihu-setup status                  # is the service up?
 
 GitHub Enterprise works too: pass its host and the API roots follow.
 
+### Token scopes
+
+A classic personal access token wants three:
+
+| scope | what it buys |
+| --- | --- |
+| `repo` | private repositories, and their pull requests and issues |
+| `read:org` | which organisations you belong to |
+| `notifications` | the inbox, though `repo` also covers it |
+
+`read:org` is the one worth knowing about, because without it nothing breaks
+loudly. GitHub returns **only your public organisation memberships**, with no
+error, so an organisation whose membership you have set to private looks like
+one you do not belong to. Ownership is built from that list, so its
+repositories are marked followed and sorted below your own work. Settings says
+so on the account's line when it can tell.
+
+It can only tell for a classic token, which announces its scopes on every
+response. An answer carrying no scopes is taken at its word, which covers a
+fine-grained token and a GitHub App, and equally anything that strips the
+header in between. Give a fine-grained token read access to **Members** at the
+organisation level if you want its repositories counted as yours.
+
 ## The off switch
 
 Settings carries the polling rhythm as chips: **1m, 5m, 15m, 60m and Off**.

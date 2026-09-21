@@ -669,8 +669,10 @@ type gqlError struct {
 
 // orgsHidden reports whether the token cannot see private organisation
 // memberships. A classic token announces its scopes in X-OAuth-Scopes and
-// needs read:org (or admin:org, which contains it) for the full list; a
-// token that sends no scopes cannot be judged and is trusted.
+// needs read:org, or write:org or admin:org which contain it, for the full
+// list. An answer carrying no scopes at all cannot be judged and is trusted:
+// that is a fine-grained token or a GitHub App, but also anything that
+// strips the header on the way back.
 func orgsHidden(h http.Header) bool {
 	scopes := h.Get("X-OAuth-Scopes")
 	if scopes == "" {

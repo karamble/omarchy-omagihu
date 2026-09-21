@@ -44,7 +44,11 @@ type AccountView struct {
 	// Organizations the account belongs to, kept from the last answer that
 	// delivered them, so a cycle that loses the list does not read as
 	// leaving every organisation.
-	Organizations  []string             `json:"organizations,omitempty"`
+	Organizations []string `json:"organizations,omitempty"`
+	// OrgsHidden is set when the token's scopes say that list is incomplete,
+	// so an organisation missing from it is not mistaken for one the account
+	// does not belong to.
+	OrgsHidden     bool                 `json:"orgsHidden,omitempty"`
 	Notifications  []forge.Notification `json:"notifications"`
 	AuthoredPRs    []forge.PullRequest  `json:"authoredPrs"`
 	ReviewRequests []forge.PullRequest  `json:"reviewRequests"`
@@ -388,6 +392,12 @@ func (p *Poller) workLoop(ctx context.Context, c Client) {
 				if work.Resolved("organizations") {
 					v.Organizations = work.Organizations
 				}
+				// Not behind the guard above, unlike the list it describes:
+				// this comes from the response header rather than the
+				// document, so it is known on any answer that arrived, including
+				// one whose organisations went unresolved and kept the
+				// previous list.
+				v.OrgsHidden = work.OrgsHidden
 				if work.Resolved("authoredPrs") {
 					v.AuthoredPRs = work.AuthoredPRs
 				}
