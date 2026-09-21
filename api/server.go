@@ -168,6 +168,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/fetch", s.handleFetchToggle)
 	mux.HandleFunc("POST /api/roots", s.handleRoots)
 	mux.HandleFunc("POST /api/local-only", s.handleLocalOnly)
+	mux.HandleFunc("POST /api/sections", s.handleSections)
 	mux.HandleFunc("POST /api/token/recycle", s.handleRecycleToken)
 
 	// The MCP endpoint is checked per request rather than mounted once, so the
@@ -393,6 +394,9 @@ type dashboardResponse struct {
 	// LocalOnly is the checkouts marked as deliberately local, so a row can
 	// show the mark and offer to lift it.
 	LocalOnly []string `json:"localOnly"`
+	// HiddenSections is what the panel keeps folded away. A view filter
+	// only: attention above is computed from the data whatever is hidden.
+	HiddenSections []string `json:"hiddenSections"`
 }
 
 // handleDashboard serves the landing view: what is waiting, what is in flight,
@@ -414,15 +418,62 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			Repos:    repos.Repos,
 			Facts:    facts,
 		}),
-		Inbox:     inbox,
-		Facts:     facts,
-		Alerts:    s.alertRows(),
-		Work:      work,
-		Repos:     repos.Repos,
-		Accounts:  remote.Accounts,
-		LocalOnly: s.localOnly(),
+		Inbox:          inbox,
+		Facts:          facts,
+		Alerts:         s.alertRows(),
+		Work:           work,
+		Repos:          repos.Repos,
+		Accounts:       remote.Accounts,
+		LocalOnly:      s.localOnly(),
+		HiddenSections: s.hiddenSections(),
 	}
 	writeJSON(w, s.logger, http.StatusOK, resp)
+}
+
+// hiddenSections is the hidden list as JSON wants it: a list, never null.
+func (s *Server) hiddenSections() []string {
+	if hidden := s.store.HiddenSectionKeys(); hidden != nil {
+		return hidden
+	}
+	return []string{}
+}
+
+// handleSections hides or shows one dashboard section, or shows every
+// section when the key is "all". Hiding "all" is refused: a dashboard with
+// nothing on it is not a state the panel offers.
+func (s *Server) handleSections(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Key    string `json:"key"`
+		Hidden *bool  `json:"hidden"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil ||
+		strings.TrimSpace(body.Key) == "" || body.Hidden == nil {
+		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
+			"error": `body must carry "key" and "hidden"`,
+		})
+		return
+	}
+	key := strings.TrimSpace(body.Key)
+	if key == "all" {
+		if *body.Hidden {
+			writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{
+				"error": "hiding every section is not offered",
+			})
+			return
+		}
+		s.store.ShowAllSections()
+	} else {
+		s.store.SetSectionHidden(key, *body.Hidden)
+	}
+	if err := s.store.Save(); err != nil {
+		s.logger.Error("persisting hidden sections", "err", err)
+		writeJSON(w, s.logger, http.StatusInternalServerError, map[string]string{
+			"error": "could not persist the setting",
+		})
+		return
+	}
+	s.logger.Info("dashboard sections changed", "key", key, "hidden", *body.Hidden)
+	writeJSON(w, s.logger, http.StatusOK, map[string]any{"hiddenSections": s.hiddenSections()})
 }
 
 // localOnly is the marked list as JSON wants it: a list, never null.

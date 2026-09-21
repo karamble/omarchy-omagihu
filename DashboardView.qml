@@ -4,16 +4,24 @@ import qs.Commons
 import qs.Ui
 
 // The landing view, ordered by who is blocked: other people first, then your
-// own broken work, then the inbox. Filter chips carry their own counts so the
-// shape of the backlog is visible before anything is clicked.
+// own broken work, then the inbox. Every section shows by default; each chip
+// folds its own section away and back, independently, and the daemon keeps
+// the choice. A folded chip keeps its count, and turns loud when the section
+// it hides holds urgent work, so the strip never disagrees with the bar
+// about whether something needs you.
 Column {
   id: view
 
   required property var owner
   property var snap: null
 
-  // "all", "reviews", "broken", "inbox", "reconcile", "issues"
-  property string filter: "all"
+  // Section keys the daemon reports as hidden. Anything not listed is shown,
+  // so an absent list shows everything.
+  readonly property var hiddenSections: snap && snap.hiddenSections ? snap.hiddenSections : []
+
+  function isHidden(key) {
+    return view.hiddenSections.indexOf(key) >= 0
+  }
 
   readonly property color foreground: owner.foreground
   readonly property string fontFamily: owner.fontFamily
@@ -65,12 +73,12 @@ Column {
     return out
   }
 
-  readonly property bool showReviews: (filter === "all" || filter === "reviews") && reviews.length > 0
-  readonly property bool showIncoming: (filter === "all" || filter === "issues") && incoming.length > 0
-  readonly property bool showBroken: (filter === "all" || filter === "broken") && brokenPrs.length > 0
-  readonly property bool showInbox: (filter === "all" || filter === "inbox") && inbox.length > 0
-  readonly property bool showFacts: (filter === "all" || filter === "reconcile") && facts.length > 0
-  readonly property bool showOpened: (filter === "all" || filter === "issues") && opened.length > 0
+  readonly property bool showReviews: !view.isHidden("reviews") && reviews.length > 0
+  readonly property bool showIncoming: !view.isHidden("issues") && incoming.length > 0
+  readonly property bool showBroken: !view.isHidden("broken") && brokenPrs.length > 0
+  readonly property bool showInbox: !view.isHidden("inbox") && inbox.length > 0
+  readonly property bool showFacts: !view.isHidden("reconcile") && facts.length > 0
+  readonly property bool showOpened: !view.isHidden("issues") && opened.length > 0
 
   spacing: Style.space(10)
 
@@ -163,22 +171,27 @@ Column {
 
   // ---------- the keyboard contract ----------
   //
-  // Row zero is the chip strip; then every entry the filter left showing, in
-  // the order the sections draw them; then the button at the foot. Each entry
-  // carries one action, which is to open it on GitHub.
+  // Row zero is the chip strip: one action per chip, which folds that section
+  // away or back, plus one more for "Show all" while anything is folded. Then
+  // every entry the sections left showing, in the order they draw, each with
+  // one action, which is to open it on GitHub; then the button at the foot.
+  // The urgent flag is what makes a folded chip loud.
   readonly property var filters: [
-    // Everything counts every section "all" draws, facts and opened issues
-    // included, so the chip and the list agree.
-    { key: "all", label: "Everything",
-      count: view.reviews.length + view.incoming.length + view.brokenPrs.length
-             + view.facts.length + view.inbox.length + view.opened.length,
-      urgent: false },
     { key: "reviews", label: "Reviews", count: view.reviews.length, urgent: view.reviews.length > 0 },
     { key: "broken", label: "Needs fixing", count: view.brokenPrs.length, urgent: view.brokenPrs.length > 0 },
     { key: "inbox", label: "Inbox", count: view.inbox.length, urgent: false },
     { key: "reconcile", label: "Reconcile", count: view.facts.length, urgent: view.urgentFacts > 0 },
     { key: "issues", label: "Issues", count: view.incoming.length + view.opened.length, urgent: view.incoming.length > 0 }
   ]
+
+  // How many of the sections this view knows are folded. A key left in the
+  // daemon's list by a section that no longer exists counts for nothing.
+  readonly property int hiddenCount: {
+    var n = 0
+    for (var i = 0; i < view.filters.length; i++) if (view.isHidden(view.filters[i].key)) n++
+    return n
+  }
+  readonly property bool anyHidden: view.hiddenCount > 0
 
   readonly property int reviewOffset: 1
   readonly property int incomingOffset: view.reviewOffset + (view.showReviews ? view.reviews.length : 0)
@@ -191,11 +204,20 @@ Column {
   readonly property int rowCount: view.moreRow + 1
   readonly property bool formFocused: false
 
-  function actionCount(row) { return row === 0 ? view.filters.length : 1 }
+  function actionCount(row) { return row === 0 ? view.filters.length + (view.anyHidden ? 1 : 0) : 1 }
+
+  function toggleSection(key) {
+    view.owner.setSectionHidden(key, !view.isHidden(key))
+  }
+
+  function showAll() {
+    view.owner.setSectionHidden("all", false)
+  }
 
   function activateRow(row, action) {
     if (row === 0) {
-      view.filter = String(view.filters[action].key)
+      if (action < view.filters.length) view.toggleSection(String(view.filters[action].key))
+      else if (view.anyHidden) view.showAll()
       return
     }
     if (row === view.moreRow) { view.owner.setView("repos"); return }
@@ -224,19 +246,41 @@ Column {
     Repeater {
       model: view.filters
       delegate: Button {
+        readonly property bool hidden: view.isHidden(modelData.key)
         Layout.fillWidth: true
+        // A shown chip keeps its border and its own colour; a folded one
+        // drops the border and dims, but keeps its count, so what is being
+        // suppressed stays visible, and keeps red when the section it hides
+        // holds urgent work. The theme's selected fill is not used: it
+        // would paint an urgent chip in the theme's colour, not in red.
         text: modelData.label + " (" + modelData.count + ")"
-        selected: view.filter === modelData.key
         hasCursor: view.owner.cursor === 0 && view.owner.actionIndex === index
-        bordered: true
-        foreground: modelData.urgent ? Color.urgent : view.foreground
+        bordered: !hidden
+        foreground: modelData.urgent ? Color.urgent : (hidden ? Qt.darker(view.foreground, 1.4) : view.foreground)
         accent: modelData.urgent ? Color.urgent : Color.accent
         fontFamily: view.fontFamily
         fontSize: Style.font.caption
         horizontalPadding: Style.space(8)
         verticalPadding: Style.space(5)
-        onClicked: view.filter = modelData.key
+        onClicked: view.toggleSection(modelData.key)
       }
+    }
+
+    // Appears only while something is folded, so it is also the sign that
+    // something is. Accent rather than plain, so it reads as the way back
+    // and not as one more folded chip.
+    Button {
+      visible: view.anyHidden
+      text: "Show all"
+      hasCursor: view.owner.cursor === 0 && view.owner.actionIndex === view.filters.length
+      bordered: true
+      foreground: Color.accent
+      accent: Color.accent
+      fontFamily: view.fontFamily
+      fontSize: Style.font.caption
+      horizontalPadding: Style.space(8)
+      verticalPadding: Style.space(5)
+      onClicked: view.showAll()
     }
   }
 
@@ -415,7 +459,7 @@ Column {
         Text {
           Layout.alignment: Qt.AlignHCenter
           textFormat: Text.PlainText
-          text: view.filter === "all" ? "Nothing waiting on you" : "Nothing in this filter"
+          text: view.anyHidden ? "Nothing in the sections shown" : "Nothing waiting on you"
           color: view.owner.toneOk
           font.family: view.fontFamily
           font.pixelSize: Style.font.body
@@ -425,9 +469,9 @@ Column {
         Text {
           Layout.alignment: Qt.AlignHCenter
           textFormat: Text.PlainText
-          text: view.filter === "all"
-                ? "Every check green, every review answered."
-                : "Switch to Everything to see the rest."
+          text: view.anyHidden
+                ? view.hiddenCount + (view.hiddenCount === 1 ? " section is" : " sections are") + " folded away; Show all brings them back."
+                : "Every check green, every review answered."
           color: Qt.darker(view.foreground, 1.5)
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption

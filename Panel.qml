@@ -323,6 +323,14 @@ Panel {
     controlProc.running = true
   }
 
+  // Dashboard sections fold away and come back from their own chips; "all"
+  // shown brings every section back. A view filter that the daemon keeps.
+  function setSectionHidden(key, hidden) {
+    if (controlProc.running) return
+    controlProc.args = ["section", String(key), hidden ? "hide" : "show", "--addr", root.addr]
+    controlProc.running = true
+  }
+
   function setMCP(on) {
     if (controlProc.running) return
     controlProc.args = ["mcp", on ? "on" : "off", "--addr", root.addr]

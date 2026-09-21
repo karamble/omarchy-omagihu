@@ -318,3 +318,44 @@ func TestLocalOnlyRoundTrips(t *testing.T) {
 		t.Errorf("an emptied list should be nil so the file drops the key, got %q", again.LocalOnly)
 	}
 }
+
+func TestHiddenSectionsRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	store := &Store{}
+	store.SetPath(path)
+	if got := store.HiddenSectionKeys(); got != nil {
+		t.Fatalf("a fresh store hides %q, want nothing: absent means everything shown", got)
+	}
+	store.SetSectionHidden("reconcile", true)
+	store.SetSectionHidden("inbox", true)
+	store.SetSectionHidden("inbox", true)
+	if got := store.HiddenSectionKeys(); !slices.Equal(got, []string{"inbox", "reconcile"}) {
+		t.Fatalf("HiddenSections = %q, want a sorted list with no duplicate", got)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := loaded.HiddenSectionKeys(); !slices.Equal(got, []string{"inbox", "reconcile"}) {
+		t.Fatalf("after reload HiddenSections = %q, want inbox and reconcile", got)
+	}
+
+	loaded.SetSectionHidden("inbox", false)
+	if got := loaded.HiddenSectionKeys(); !slices.Equal(got, []string{"reconcile"}) {
+		t.Fatalf("after showing inbox HiddenSections = %q, want reconcile only", got)
+	}
+	loaded.ShowAllSections()
+	if err := loaded.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	again, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if again.HiddenSections != nil {
+		t.Errorf("after show all the field should be nil so the key leaves the file, got %q", again.HiddenSections)
+	}
+}

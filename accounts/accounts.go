@@ -94,6 +94,12 @@ type Store struct {
 	// state for a pointer to carry.
 	LocalOnly []string `json:"localOnly,omitempty"`
 
+	// HiddenSections lists the dashboard sections the panel keeps folded
+	// away. It stores what is hidden, never what is shown: an absent or
+	// empty list means everything is visible, so a missing field, an old
+	// file or a bad day can only ever show more, not hide work.
+	HiddenSections []string `json:"hiddenSections,omitempty"`
+
 	// mu guards every field of the store: the API mutates it from concurrent
 	// HTTP handlers (monitoring, notify, roots, token) while the auth
 	// middleware, health handler, alerts engine and notifier read it.
@@ -285,6 +291,36 @@ func (s *Store) SetLocalOnly(path string, on bool) {
 	}
 }
 
+// HiddenSectionKeys returns the dashboard sections kept hidden.
+func (s *Store) HiddenSectionKeys() []string {
+	s.lock().RLock()
+	defer s.lock().RUnlock()
+	return slices.Clone(s.HiddenSections)
+}
+
+// SetSectionHidden hides or shows one dashboard section. The list stays
+// sorted and free of duplicates, and empties to nil so the key leaves the
+// file.
+func (s *Store) SetSectionHidden(key string, hidden bool) {
+	s.lock().Lock()
+	defer s.lock().Unlock()
+	s.HiddenSections = slices.DeleteFunc(s.HiddenSections, func(k string) bool { return k == key })
+	if hidden {
+		s.HiddenSections = append(s.HiddenSections, key)
+		slices.Sort(s.HiddenSections)
+	}
+	if len(s.HiddenSections) == 0 {
+		s.HiddenSections = nil
+	}
+}
+
+// ShowAllSections clears the hidden list.
+func (s *Store) ShowAllSections() {
+	s.lock().Lock()
+	defer s.lock().Unlock()
+	s.HiddenSections = nil
+}
+
 // RecycleAPIToken mints a fresh bearer token, invalidating every client that
 // holds the old one. That is the point: it is how a leaked token is revoked.
 func (s *Store) RecycleAPIToken() (string, error) {
@@ -467,16 +503,17 @@ func (s *Store) Redacted() *Store {
 	s.lock().RLock()
 	defer s.lock().RUnlock()
 	out := Store{
-		Version:      s.Version,
-		APIToken:     redact(s.APIToken),
-		Monitoring:   s.Monitoring,
-		IntervalMin:  s.IntervalMin,
-		MCPEnabled:   s.MCPEnabled,
-		Notify:       s.Notify,
-		FetchEnabled: s.FetchEnabled,
-		FetchMin:     s.FetchMin,
-		Roots:        slices.Clone(s.Roots),
-		LocalOnly:    slices.Clone(s.LocalOnly),
+		Version:        s.Version,
+		APIToken:       redact(s.APIToken),
+		Monitoring:     s.Monitoring,
+		IntervalMin:    s.IntervalMin,
+		MCPEnabled:     s.MCPEnabled,
+		Notify:         s.Notify,
+		FetchEnabled:   s.FetchEnabled,
+		FetchMin:       s.FetchMin,
+		Roots:          slices.Clone(s.Roots),
+		LocalOnly:      slices.Clone(s.LocalOnly),
+		HiddenSections: slices.Clone(s.HiddenSections),
 	}
 	for _, a := range s.Accounts {
 		a.Token = redact(a.Token)

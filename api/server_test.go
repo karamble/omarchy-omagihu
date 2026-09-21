@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/karamble/omarchy-omagihu/accounts"
+	"github.com/karamble/omarchy-omagihu/attention"
 	"github.com/karamble/omarchy-omagihu/correlate"
 	"github.com/karamble/omarchy-omagihu/forge"
 	"github.com/karamble/omarchy-omagihu/local"
@@ -388,5 +389,72 @@ func TestAnnotateCountsOrganisationsAsYours(t *testing.T) {
 	}
 	if got.Repos[0].Name != "dcrd" {
 		t.Errorf("order = %s first, want the organisation's repository above the followed one", got.Repos[0].Name)
+	}
+}
+
+// TestHiddenSectionsAreAViewFilterOnly pins the hazard: hiding the section
+// that holds urgent work changes what the dashboard lists and nothing about
+// what the bar and the alert sample report.
+func TestHiddenSectionsAreAViewFilterOnly(t *testing.T) {
+	store := &accounts.Store{APIToken: "tok"}
+	store.SetPath(filepath.Join(t.TempDir(), "accounts.json"))
+	remote := &poll.Snapshot{Accounts: []poll.AccountView{{
+		AccountID: "a", Login: "a",
+		ReviewRequests: []forge.PullRequest{{Repo: "o/r", Number: 3, URL: "u3", Title: "please look"}},
+	}}}
+	s := NewServer(store, fixedPoller{remote}, fixedWatcher{&local.Snapshot{}}, slog.New(slog.DiscardHandler), "test")
+	h := s.Handler()
+
+	call := func(method, path, body string, want int) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("%s %s: %d %s", method, path, rec.Code, rec.Body.String())
+		}
+		var out map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out
+	}
+	attentionOf := func(doc map[string]any) (string, float64) {
+		att := doc["attention"].(map[string]any)
+		return att["level"].(string), att["tier"].(float64)
+	}
+
+	before := call(http.MethodGet, "/api/dashboard", "", http.StatusOK)
+	if got := anyStrings(before["hiddenSections"]); !slices.Equal(got, []string{}) {
+		t.Fatalf("hiddenSections = %v, want an empty list, not null", got)
+	}
+	levelBefore, tierBefore := attentionOf(before)
+	if tierBefore != float64(attention.TierReview) {
+		t.Fatalf("fixture tier = %v, want the review tier so hiding it means something", tierBefore)
+	}
+
+	call(http.MethodPost, "/api/sections", `{"key":"reviews","hidden":true}`, http.StatusOK)
+	call(http.MethodPost, "/api/sections", `{"key":"inbox","hidden":true}`, http.StatusOK)
+	after := call(http.MethodGet, "/api/dashboard", "", http.StatusOK)
+	if got := anyStrings(after["hiddenSections"]); !slices.Equal(got, []string{"inbox", "reviews"}) {
+		t.Fatalf("hiddenSections = %v, want inbox and reviews", got)
+	}
+	levelAfter, tierAfter := attentionOf(after)
+	if levelAfter != levelBefore || tierAfter != tierBefore {
+		t.Fatalf("hiding a section changed attention from %s/%v to %s/%v: toggles must never touch the bar",
+			levelBefore, tierBefore, levelAfter, tierAfter)
+	}
+	if got := s.AlertSample().Attention.Tier; got != attention.TierReview {
+		t.Fatalf("alert sample tier = %v after hiding reviews, want the review tier", got)
+	}
+	// The work itself is still in the document; only the panel folds it.
+	if n := len(after["work"].(map[string]any)["reviewRequests"].([]any)); n != 1 {
+		t.Fatalf("reviewRequests in the document = %d after hiding, want 1: hiding is a view filter", n)
+	}
+
+	call(http.MethodPost, "/api/sections", `{"key":"all","hidden":true}`, http.StatusBadRequest)
+	call(http.MethodPost, "/api/sections", `{"key":"","hidden":true}`, http.StatusBadRequest)
+	call(http.MethodPost, "/api/sections", `{"key":"all","hidden":false}`, http.StatusOK)
+	if got := anyStrings(call(http.MethodGet, "/api/dashboard", "", http.StatusOK)["hiddenSections"]); !slices.Equal(got, []string{}) {
+		t.Fatalf("after show all hiddenSections = %v, want empty", got)
 	}
 }
