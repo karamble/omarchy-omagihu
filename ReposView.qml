@@ -44,7 +44,10 @@ Column {
       "ci-red-on-head": "CI RED HERE",
       "changes-requested": "CHANGES",
       "stale-branch": "MERGED",
-      "fork-behind": "BEHIND UPSTREAM"
+      "fork-behind": "BEHIND UPSTREAM",
+      "detached-work": "DETACHED WORK",
+      "no-remote": "NO REMOTE",
+      "pr-base-moved": "BASE MOVED"
     })[kind] || String(kind).toUpperCase()
   }
 
@@ -157,9 +160,12 @@ Column {
     var out = []
     var drift = view.factsByPath[r.path] || []
     for (var i = 0; i < drift.length; i++) {
+      // Detached work is a notice so the bar stays on the local tier, but it
+      // is the one local state where commits can vanish, so the badge shouts.
+      var loud = drift[i].severity === "urgent" || drift[i].kind === "detached-work"
       out.push({ text: view.factLabel(drift[i].kind),
-                 tone: drift[i].severity === "urgent" ? Color.urgent : Color.accent,
-                 loud: drift[i].severity === "urgent" })
+                 tone: loud ? Color.urgent : Color.accent,
+                 loud: loud })
     }
     if (view.isInterrupted(r))
       out.push({ text: String(r.operation).toUpperCase(), tone: Color.urgent, loud: true })

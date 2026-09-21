@@ -246,3 +246,122 @@ func TestNilSnapshotsAreSafe(t *testing.T) {
 		t.Errorf("Correlate(nil, nil) = %+v, want nil", facts)
 	}
 }
+
+// find returns the first fact of a kind, or fails the test.
+func find(t *testing.T, facts []Fact, k Kind) Fact {
+	t.Helper()
+	for _, f := range facts {
+		if f.Kind == k {
+			return f
+		}
+	}
+	t.Fatalf("kinds = %v, want %s", kinds(facts), k)
+	return Fact{}
+}
+
+func TestDetachedWork(t *testing.T) {
+	facts := Correlate(&poll.Snapshot{}, repo(local.Repo{
+		Branch: "(detached)", Detached: true, Unpushed: 1, Path: "/checkout/r",
+	}))
+	f := find(t, facts, KindDetachedWork)
+	if f.Urgent() {
+		t.Error("detached-work must not be urgent: that would lift the bar off the local tier")
+	}
+	if f.Path != "/checkout/r" || f.Branch != "(detached)" {
+		t.Errorf("fact = %+v, want it keyed on the checkout's path and branch", f)
+	}
+
+	// The adjacent cases: a detached HEAD with nothing unpushed, and ordinary
+	// unpushed work on a named branch, which is a badge and not a fact.
+	if got := Correlate(&poll.Snapshot{}, repo(local.Repo{Branch: "(detached)", Detached: true})); hasKind(got, KindDetachedWork) {
+		t.Errorf("kinds = %v, want no detached-work when nothing is unpushed", kinds(got))
+	}
+	if got := Correlate(&poll.Snapshot{}, repo(local.Repo{Branch: "topic", Unpushed: 3})); hasKind(got, KindDetachedWork) {
+		t.Errorf("kinds = %v, want no detached-work on a named branch", kinds(got))
+	}
+}
+
+func TestNoRemote(t *testing.T) {
+	committed := local.Repo{
+		Name: "scratch", Path: "/s", Branch: "main",
+		Remotes: map[string]string{}, Last: local.Commit{SHA: "abc"},
+	}
+	f := find(t, Correlate(&poll.Snapshot{}, repo(committed)), KindNoRemote)
+	if f.Urgent() {
+		t.Error("no-remote is informational: a local-only repository may be deliberate")
+	}
+	if f.Path != "/s" || f.Repo != "scratch" {
+		t.Errorf("fact = %+v, want the checkout's path and, with no forge name, its own name", f)
+	}
+
+	// A fresh init has nothing to lose, and a repository with a remote is
+	// somebody else's rule.
+	empty := committed
+	empty.Last = local.Commit{}
+	if got := Correlate(&poll.Snapshot{}, repo(empty)); hasKind(got, KindNoRemote) {
+		t.Errorf("kinds = %v, want no no-remote for a repository with no commits", kinds(got))
+	}
+	pushed := committed
+	pushed.Remotes = map[string]string{"origin": "git@github.com:o/r.git"}
+	if got := Correlate(&poll.Snapshot{}, repo(pushed)); hasKind(got, KindNoRemote) {
+		t.Errorf("kinds = %v, want no no-remote when a remote exists", kinds(got))
+	}
+
+	// The seam the suppression list will plug into.
+	opts := Options{DeliberatelyLocal: func(r local.Repo) bool { return r.Path == "/s" }}
+	if got := CorrelateWith(&poll.Snapshot{}, repo(committed), opts); hasKind(got, KindNoRemote) {
+		t.Errorf("kinds = %v, want no no-remote for a repository marked deliberately local", kinds(got))
+	}
+}
+
+func TestPRBaseMoved(t *testing.T) {
+	approved := forge.PullRequest{
+		Repo: "original/thing", Number: 12, URL: "u12", HeadRef: "topic", ReviewDecision: "APPROVED",
+	}
+	// A fork checkout: origin is the fork, upstream is the repository the
+	// pull request belongs to.
+	fork := local.Repo{
+		Name: "thing", Path: "/fork", Branch: "topic", UpstreamBehind: 8,
+		Remotes: map[string]string{
+			"origin":   "git@github.com:karamble/thing.git",
+			"upstream": "https://github.com/original/thing.git",
+		},
+	}
+
+	f := find(t, Correlate(snap([]forge.PullRequest{approved}, nil), repo(fork)), KindPRBaseMoved)
+	if f.Number != 12 || f.URL != "u12" || f.Path != "/fork" || f.Repo != "original/thing" {
+		t.Errorf("fact = %+v, want it to name the pull request and the fork checkout", f)
+	}
+	if f.Urgent() {
+		t.Error("pr-base-moved is a notice: nothing is broken, the base moved")
+	}
+
+	// Still being reviewed: expected to drift, so quiet.
+	pending := approved
+	pending.ReviewDecision = "REVIEW_REQUIRED"
+	if got := Correlate(snap([]forge.PullRequest{pending}, nil), repo(fork)); hasKind(got, KindPRBaseMoved) {
+		t.Errorf("kinds = %v, want no pr-base-moved while the review is pending", kinds(got))
+	}
+	// Approved and current.
+	current := fork
+	current.UpstreamBehind = 0
+	if got := Correlate(snap([]forge.PullRequest{approved}, nil), repo(current)); hasKind(got, KindPRBaseMoved) {
+		t.Errorf("kinds = %v, want no pr-base-moved when the base has not moved", kinds(got))
+	}
+	// Another branch of the same fork.
+	other := fork
+	other.Branch = "elsewhere"
+	if got := Correlate(snap([]forge.PullRequest{approved}, nil), repo(other)); hasKind(got, KindPRBaseMoved) {
+		t.Errorf("kinds = %v, want no pr-base-moved on a branch that is not the pull request head", kinds(got))
+	}
+
+	// A clone of the repository itself, with an upstream remote, joins through
+	// origin as every other kind does.
+	clone := fork
+	clone.Path = "/clone"
+	clone.Remotes = map[string]string{
+		"origin":   "git@github.com:original/thing.git",
+		"upstream": "https://github.com/original/thing.git",
+	}
+	find(t, Correlate(snap([]forge.PullRequest{approved}, nil), repo(clone)), KindPRBaseMoved)
+}

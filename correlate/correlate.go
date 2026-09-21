@@ -31,6 +31,14 @@ const (
 	KindStaleBranch Kind = "stale-branch"
 	// KindForkBehind: a fork trailing the repository it was forked from.
 	KindForkBehind Kind = "fork-behind"
+	// KindDetachedWork: commits on a detached HEAD. No branch names them, so
+	// the next checkout leaves them reachable only through the reflog.
+	KindDetachedWork Kind = "detached-work"
+	// KindNoRemote: a repository holding commits with nowhere to push them.
+	KindNoRemote Kind = "no-remote"
+	// KindPRBaseMoved: an approved pull request whose base advanced after the
+	// branch diverged, so it may want a rebase before it merges.
+	KindPRBaseMoved Kind = "pr-base-moved"
 )
 
 // Severity levels, matching the vocabulary the panel and the bar already use.
@@ -84,8 +92,21 @@ func checksFailed(pr forge.PullRequest) bool {
 	return pr.ChecksState == "FAILURE" || pr.ChecksState == "ERROR"
 }
 
+// Options tunes Correlate. The zero value applies every rule to every
+// checkout.
+type Options struct {
+	// DeliberatelyLocal reports a repository that is meant to have no remote,
+	// which silences the no-remote fact for it. Nil means none are.
+	DeliberatelyLocal func(repo local.Repo) bool
+}
+
 // Correlate joins the account view to the checkouts on this machine.
 func Correlate(remote *poll.Snapshot, lcl *local.Snapshot) []Fact {
+	return CorrelateWith(remote, lcl, Options{})
+}
+
+// CorrelateWith is Correlate with its options spelled out.
+func CorrelateWith(remote *poll.Snapshot, lcl *local.Snapshot, opts Options) []Fact {
 	if remote == nil || lcl == nil {
 		return nil
 	}
@@ -93,18 +114,44 @@ func Correlate(remote *poll.Snapshot, lcl *local.Snapshot) []Fact {
 	// Two checkouts can point at the same repository, a fork and a clone of the
 	// parent, so the index holds every one of them.
 	byRepo := make(map[string][]local.Repo)
+	// A fork's checkout names the parent through its upstream remote, and the
+	// parent is the repository a pull request from the fork belongs to.
+	byUpstream := make(map[string][]local.Repo)
 	for _, r := range lcl.Repos {
-		key := NormalizeRemote(r.Remotes["origin"])
-		if key == "" {
-			continue
+		if key := NormalizeRemote(r.Remotes["origin"]); key != "" {
+			byRepo[key] = append(byRepo[key], r)
 		}
-		byRepo[key] = append(byRepo[key], r)
+		if key := NormalizeRemote(r.Remotes["upstream"]); key != "" {
+			byUpstream[key] = append(byUpstream[key], r)
+		}
 	}
 
 	open, merged := dedupePRs(remote)
 
 	var facts []Fact
 	for _, pr := range open {
+		// UpstreamBehind is counted against the upstream remote's default
+		// branch, which is the base of a pull request opened from a fork.
+		// Approval is the gate: a branch still being worked on is expected to
+		// drift, an approved one is a click from merging and the stale base
+		// is what stops it.
+		if pr.ReviewDecision == "APPROVED" {
+			for _, repo := range prCheckouts(pr, byRepo, byUpstream) {
+				if repo.UpstreamBehind <= 0 {
+					continue
+				}
+				facts = append(facts, Fact{
+					Kind:     KindPRBaseMoved,
+					Severity: Notice,
+					Repo:     pr.Repo, Path: repo.Path, Branch: repo.Branch,
+					URL: pr.URL, Number: pr.Number,
+					Summary: fmt.Sprintf("%s #%d is approved but %s behind its base",
+						repo.Name, pr.Number, plural(repo.UpstreamBehind, "commit", "commits")),
+					Detail: "counted against upstream's default branch as last fetched; a rebase brings it current",
+				})
+			}
+		}
+
 		for _, repo := range byRepo[pr.Repo] {
 			if repo.Branch != pr.HeadRef {
 				continue
@@ -169,18 +216,48 @@ func Correlate(remote *poll.Snapshot, lcl *local.Snapshot) []Fact {
 	}
 
 	for _, repo := range lcl.Repos {
-		if repo.UpstreamBehind <= 0 {
-			continue
+		if repo.UpstreamBehind > 0 {
+			facts = append(facts, Fact{
+				Kind:     KindForkBehind,
+				Severity: Notice,
+				Repo:     NormalizeRemote(repo.Remotes["origin"]),
+				Path:     repo.Path, Branch: repo.Branch,
+				Summary: fmt.Sprintf("%s is %s behind upstream",
+					repo.Name, plural(repo.UpstreamBehind, "commit", "commits")),
+				Detail: "counted against the refs last fetched",
+			})
 		}
-		facts = append(facts, Fact{
-			Kind:     KindForkBehind,
-			Severity: Notice,
-			Repo:     NormalizeRemote(repo.Remotes["origin"]),
-			Path:     repo.Path, Branch: repo.Branch,
-			Summary: fmt.Sprintf("%s is %s behind upstream",
-				repo.Name, plural(repo.UpstreamBehind, "commit", "commits")),
-			Detail: "counted against the refs last fetched",
-		})
+
+		// Unpushed counts commits reachable from HEAD and from no remote. On a
+		// detached HEAD that is work no branch is known to name. Notice, not
+		// urgent: an urgent fact lifts the bar to the reconcile tier, and this
+		// is local work, which stays at the local tier; the badge is loud
+		// instead.
+		if repo.Detached && repo.Unpushed > 0 {
+			facts = append(facts, Fact{
+				Kind:     KindDetachedWork,
+				Severity: Notice,
+				Repo:     NormalizeRemote(repo.Remotes["origin"]),
+				Path:     repo.Path, Branch: repo.Branch,
+				Summary: fmt.Sprintf("%s: %s on a detached HEAD",
+					repo.Name, plural(repo.Unpushed, "commit", "commits")),
+				Detail: "no branch names this work and the next checkout leaves it to the reflog; git switch -c <name> keeps it",
+			})
+		}
+
+		// Commits with nowhere to go. A commit has to exist: a fresh init with
+		// nothing committed has nothing to lose.
+		if len(repo.Remotes) == 0 && repo.Last.SHA != "" &&
+			!(opts.DeliberatelyLocal != nil && opts.DeliberatelyLocal(repo)) {
+			facts = append(facts, Fact{
+				Kind:     KindNoRemote,
+				Severity: Notice,
+				Repo:     repo.Name,
+				Path:     repo.Path, Branch: repo.Branch,
+				Summary: fmt.Sprintf("%s has commits and no remote", repo.Name),
+				Detail:  "everything here exists on this disk only",
+			})
+		}
 	}
 
 	// Urgent first, then stable by repository and kind so the list does not
@@ -198,6 +275,24 @@ func Correlate(remote *poll.Snapshot, lcl *local.Snapshot) []Fact {
 		return strings.Compare(string(a.Kind), string(b.Kind))
 	})
 	return facts
+}
+
+// prCheckouts finds the checkouts sitting on a pull request's branch, whether
+// they clone the repository the pull request belongs to or a fork of it.
+func prCheckouts(pr forge.PullRequest, byRepo, byUpstream map[string][]local.Repo) []local.Repo {
+	var out []local.Repo
+	seen := make(map[string]struct{})
+	for _, repo := range slices.Concat(byRepo[pr.Repo], byUpstream[pr.Repo]) {
+		if repo.Branch != pr.HeadRef {
+			continue
+		}
+		if _, dup := seen[repo.Path]; dup {
+			continue
+		}
+		seen[repo.Path] = struct{}{}
+		out = append(out, repo)
+	}
+	return out
 }
 
 // dedupePRs flattens the accounts, since the same pull request can be visible
