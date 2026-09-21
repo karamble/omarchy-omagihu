@@ -534,36 +534,54 @@ Column {
     }
   }
 
-  PanelSeparator { width: parent.width }
+  PanelSeparator {
+    width: parent.width
+    foreground: view.foreground
+  }
 
-  // ---------- standing totals ----------
+  // ---------- standing totals: the figures, and the way to the repositories
+  // they come from. Unpushed and interrupted appear only while they are
+  // non-zero, in the tone the repositories view gives them.
+  component Figure: HeroStat {
+    foreground: view.foreground
+    fontFamily: view.fontFamily
+  }
+
   RowLayout {
     width: parent.width
     spacing: Style.space(8)
 
-    Text {
+    Row {
       Layout.fillWidth: true
-      textFormat: Text.PlainText
-      text: view.authored.length + " open PRs · " + view.assignedCount + " issues assigned"
-      color: view.dim
-      font.family: view.fontFamily
-      font.pixelSize: Style.font.caption
-      elide: Text.ElideRight
-    }
+      spacing: Style.space(18)
 
-    Badge {
-      visible: view.att && view.att.reposAtRisk > 0
-      text: view.att ? (view.att.unpushedTotal + " UNPUSHED") : ""
-      tone: Color.accent
-      fontFamily: view.fontFamily
-    }
+      Figure {
+        value: String(view.authored.length)
+        label: "open PRs"
+        icon: view.owner.iconPr
+      }
 
-    Badge {
-      visible: view.att && view.att.interrupted > 0
-      text: view.att ? (view.att.interrupted + " INTERRUPTED") : ""
-      tone: Color.urgent
-      loud: true
-      fontFamily: view.fontFamily
+      Figure {
+        value: String(view.assignedCount)
+        label: "issues assigned"
+        icon: view.owner.iconIssue
+      }
+
+      Figure {
+        visible: !!view.att && view.att.reposAtRisk > 0
+        value: view.att ? String(view.att.unpushedTotal) : "0"
+        label: "unpushed"
+        icon: view.owner.iconBranch
+        valueColor: Color.accent
+      }
+
+      Figure {
+        visible: !!view.att && view.att.interrupted > 0
+        value: view.att ? String(view.att.interrupted) : "0"
+        label: "interrupted"
+        icon: view.owner.iconWarn
+        valueColor: Color.urgent
+      }
     }
 
     Button {

@@ -786,11 +786,11 @@ Panel {
     text: root.iconBranch
     active: root.level === "urgent" || root.level === "warn"
     foreground: {
-      if (root.helperMissing) return Qt.darker(root.foreground, 1.6)
-      if (root.level === "asleep") return Qt.darker(root.foreground, 2.0)
+      if (root.helperMissing) return Util.alpha(root.foreground, 0.5)
+      if (root.level === "asleep") return Util.alpha(root.foreground, 0.4)
       if (root.level === "urgent") return Color.urgent
       if (root.level === "warn") return Color.accent
-      if (root.level === "notice") return Qt.darker(root.foreground, 1.2)
+      if (root.level === "notice") return Util.alpha(root.foreground, 0.8)
       return root.foreground
     }
     tooltipText: {
@@ -947,7 +947,7 @@ Panel {
                 if (!root.monitoring) return "ASLEEP · NOTHING LEAVES THIS MACHINE"
                 return String(root.attention ? root.attention.summary : "").toUpperCase()
               }
-              color: root.level === "urgent" ? Color.urgent : Qt.darker(root.foreground, 1.4)
+              color: root.level === "urgent" ? Color.urgent : Util.alpha(root.foreground, 0.6)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               font.bold: true
@@ -1106,7 +1106,7 @@ Panel {
             wrapMode: Text.WordWrap
             text: "This compiles in a terminal and then restarts the shell, which is "
                 + "what swaps the running daemon for the one just built."
-            color: Qt.darker(root.foreground, 1.4)
+            color: Util.alpha(root.foreground, 0.6)
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
           }
@@ -1148,7 +1148,7 @@ Panel {
             wrapMode: Text.WordWrap
             text: "This opens a terminal, compiles the helpers, asks which directories "
                 + "hold your checkouts, and starts the service. Or do it by hand:"
-            color: Qt.darker(root.foreground, 1.4)
+            color: Util.alpha(root.foreground, 0.6)
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
           }

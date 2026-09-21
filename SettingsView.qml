@@ -14,6 +14,11 @@ Column {
 
   readonly property color foreground: owner.foreground
   readonly property string fontFamily: owner.fontFamily
+  // Dims as alpha over the foreground, so they stay lighter than the text on
+  // a light theme as well as a dark one.
+  readonly property color body: Util.alpha(view.foreground, 0.8)
+  readonly property color quiet: Util.alpha(view.foreground, 0.6)
+  readonly property color faint: Util.alpha(view.foreground, 0.55)
 
   readonly property var health: snap && snap.health ? snap.health : null
   readonly property var accounts: snap && snap.accounts ? snap.accounts : []
@@ -150,6 +155,7 @@ Column {
     PanelSectionHeader {
       text: "POLLING"
       foreground: view.foreground
+      color: view.quiet
       fontFamily: view.fontFamily
     }
 
@@ -177,9 +183,9 @@ Column {
           radius: Style.cornerRadius > 0 ? Style.space(4) : 0
           color: isSelected
                  ? Qt.rgba(tone.r, tone.g, tone.b, 0.25)
-                 : Qt.rgba(view.foreground.r, view.foreground.g, view.foreground.b, 0.04)
+                 : Util.alpha(view.foreground, 0.04)
           borderSpec: Border.controlSpec("normal",
-                        isSelected ? tone : Qt.darker(view.foreground, 3.5), tone)
+                        isSelected ? tone : Util.alpha(view.foreground, 0.25), tone)
 
           Text {
             anchors.centerIn: parent
@@ -188,7 +194,7 @@ Column {
             font.family: view.fontFamily
             font.pixelSize: Style.font.caption
             font.bold: parent.isSelected
-            color: parent.isSelected ? parent.tone : Qt.darker(view.foreground, 1.5)
+            color: parent.isSelected ? parent.tone : view.faint
           }
 
           MouseArea {
@@ -210,7 +216,7 @@ Column {
                + "against the rate limit.")
             : ("Asleep. No request leaves this machine, no repository is inspected, and no git "
                + "process runs. The last snapshot below is what was known when it stopped.")
-      color: view.owner.monitoring ? Qt.darker(view.foreground, 1.5) : Color.urgent
+      color: view.owner.monitoring ? view.faint : Color.urgent
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -226,6 +232,7 @@ Column {
     PanelSectionHeader {
       text: "DESKTOP NOTIFICATIONS"
       foreground: view.foreground
+      color: view.quiet
       fontFamily: view.fontFamily
     }
 
@@ -251,7 +258,7 @@ Column {
       text: "Only transitions are announced, so a standing failure is reported once "
           + "rather than repeatedly, and a restart does not replay what you already knew. "
           + "Nothing is announced while polling is off."
-      color: Qt.darker(view.foreground, 1.5)
+      color: view.faint
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -267,6 +274,7 @@ Column {
     PanelSectionHeader {
       text: "SETUP"
       foreground: view.foreground
+      color: view.quiet
       fontFamily: view.fontFamily
     }
 
@@ -334,7 +342,7 @@ Column {
       text: "Each opens a floating terminal. Watched folders asks where your checkouts "
           + "live and restarts the service; adding an account needs a terminal because "
           + "the token is read from stdin, never from a command line."
-      color: Qt.darker(view.foreground, 1.5)
+      color: view.faint
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -350,6 +358,7 @@ Column {
     PanelSectionHeader {
       text: "REMOTE REFS"
       foreground: view.foreground
+      color: view.quiet
       fontFamily: view.fontFamily
     }
 
@@ -385,9 +394,9 @@ Column {
           radius: Style.cornerRadius > 0 ? Style.space(4) : 0
           color: isSelected
                  ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.25)
-                 : Qt.rgba(view.foreground.r, view.foreground.g, view.foreground.b, 0.04)
+                 : Util.alpha(view.foreground, 0.04)
           borderSpec: Border.controlSpec("normal",
-                        isSelected ? Color.accent : Qt.darker(view.foreground, 3.5), Color.accent)
+                        isSelected ? Color.accent : Util.alpha(view.foreground, 0.25), Color.accent)
 
           Text {
             anchors.centerIn: parent
@@ -396,7 +405,7 @@ Column {
             font.family: view.fontFamily
             font.pixelSize: Style.font.caption
             font.bold: parent.isSelected
-            color: parent.isSelected ? Color.accent : Qt.darker(view.foreground, 1.5)
+            color: parent.isSelected ? Color.accent : view.faint
           }
 
           MouseArea {
@@ -416,7 +425,7 @@ Column {
             ? ("Fetching every " + view.owner.fetchMin + " minutes. Without this, a commit keeps "
                + "looking unpushed until something else fetches, and fork divergence is a guess.")
             : "Off. Unpushed counts and fork divergence are only as fresh as your last manual fetch."
-      color: Qt.darker(view.foreground, 1.5)
+      color: view.faint
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -432,6 +441,7 @@ Column {
     PanelSectionHeader {
       text: "MCP SERVER"
       foreground: view.foreground
+      color: view.quiet
       fontFamily: view.fontFamily
     }
 
@@ -454,7 +464,7 @@ Column {
       width: parent.width
       implicitHeight: mcpInfo.implicitHeight + Style.space(16)
       radius: Style.cornerRadius > 0 ? Style.space(6) : 0
-      color: Qt.rgba(view.foreground.r, view.foreground.g, view.foreground.b, 0.04)
+      color: Util.alpha(view.foreground, 0.04)
       border.width: 1
       border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.25)
 
@@ -474,7 +484,7 @@ Column {
           text: view.owner.mcpEnabled
                 ? ("Endpoint  http://" + view.owner.addr + "/mcp")
                 : "Disabled. The endpoint answers 404 until this is switched on."
-          color: view.owner.mcpEnabled ? Color.accent : Qt.darker(view.foreground, 1.4)
+          color: view.owner.mcpEnabled ? Color.accent : view.quiet
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption
           font.bold: true
@@ -486,7 +496,7 @@ Column {
           wrapMode: Text.WordWrap
           text: "To connect, print the entry and paste it into the mcpServers object "
               + "in ~/.claude.json:"
-          color: Qt.darker(view.foreground, 1.4)
+          color: view.quiet
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -509,7 +519,7 @@ Column {
               + "straight into ~/.claude.json. Every client still holding the old one is "
               + "locked out until you do, Claude included. It stays otherwise in the 0600 "
               + "store, and this panel forgets it as soon as the card closes."
-          color: Qt.darker(view.foreground, 1.5)
+          color: view.faint
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -563,7 +573,7 @@ Column {
           wrapMode: Text.WordWrap
           text: "Paste this entry into the mcpServers object in ~/.claude.json. "
               + "Every client still holding the old token is locked out until you do."
-          color: Qt.darker(view.foreground, 1.4)
+          color: view.quiet
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -614,7 +624,7 @@ Column {
           width: parent.width
           wrapMode: Text.WordWrap
           text: "This disappears when the panel closes."
-          color: Qt.darker(view.foreground, 1.6)
+          color: Util.alpha(view.foreground, 0.5)
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -658,6 +668,7 @@ Column {
     PanelSectionHeader {
       text: "ACCOUNTS"
       foreground: view.foreground
+      color: view.quiet
       fontFamily: view.fontFamily
     }
 
@@ -680,9 +691,9 @@ Column {
           if (modelData.workError) bits.push("work error: " + modelData.workError)
           // A partial answer is not an error: the poll succeeded with holes.
           if (modelData.workPartial) bits.push("partial answer: " + modelData.workPartial)
-          return line + "  ·  " + bits.join(" • ")
+          return line + "  ·  " + bits.join(" · ")
         }
-        color: (modelData.inboxError || modelData.workError) ? Color.urgent : Qt.darker(view.foreground, 1.2)
+        color: (modelData.inboxError || modelData.workError) ? Color.urgent : view.body
         font.family: view.fontFamily
         font.pixelSize: Style.font.caption
       }
@@ -706,6 +717,7 @@ Column {
     PanelSectionHeader {
       text: "DAEMON"
       foreground: view.foreground
+      color: view.quiet
       fontFamily: view.fontFamily
     }
 
@@ -715,12 +727,12 @@ Column {
       wrapMode: Text.WordWrap
       text: {
         if (!view.health) return "not connected"
-        return "omagihud " + view.health.version + " • up " + view.health.uptime
+        return "omagihud " + view.health.version + " · up " + view.health.uptime
              + "\n" + view.health.repos + " repositories watched, " + view.health.reposAtRisk + " need attention"
              + "\nremote polled " + view.ago(view.health.polledAt)
-             + " • repositories scanned " + view.ago(view.health.scannedAt)
+             + " · repositories scanned " + view.ago(view.health.scannedAt)
       }
-      color: Qt.darker(view.foreground, 1.2)
+      color: view.body
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -746,6 +758,7 @@ Column {
     PanelSectionHeader {
       text: "PANEL"
       foreground: view.foreground
+      color: view.quiet
       fontFamily: view.fontFamily
     }
 
@@ -765,7 +778,7 @@ Column {
       wrapMode: Text.WordWrap
       text: "Daemon address " + view.owner.addr + ", panel refresh every " + view.owner.refreshSec + "s. "
           + "Both are editable in the plugin settings, along with the roots the daemon watches."
-      color: Qt.darker(view.foreground, 1.5)
+      color: view.faint
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption
     }

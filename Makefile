@@ -31,6 +31,7 @@ BINARIES := omagihud omagihu omagihu-setup
 PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins/karamble.omagihu
 PLUGIN_FILES := manifest.json Panel.qml Service.qml DashboardView.qml ReposView.qml \
 		AlertsView.qml ArmForm.qml SettingsView.qml ListRow.qml Badge.qml \
+		HeroStat.qml StatLine.qml SplitBar.qml \
 		README.md LICENSE preview.png
 
 .PHONY: all build test verify toolchain clean install install-check lint qmltools validate validate-full

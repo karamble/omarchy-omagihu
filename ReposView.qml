@@ -464,143 +464,20 @@ Column {
   spacing: Style.space(10)
 
   // ---------- the pieces a disclosed row is drawn with ----------
-
-  // Labels share one column across every section, so the values line up
-  // down the whole detail and not only inside one card.
+  //
+  // HeroStat, StatLine and SplitBar are shared with the other views; these
+  // bind them to this view's foreground and font once, so every use is short.
   readonly property int labelColumn: Style.space(84)
 
-  // One headline figure: a large value over a quiet label, with the
-  // label's glyph beside the word so the mark is learned and never a puzzle.
-  component HeroStat: Column {
-    id: stat
-    property string value: ""
-    property string label: ""
-    property string icon: ""
-    spacing: 0
-
-    Text {
-      textFormat: Text.PlainText
-      text: stat.value
-      color: view.foreground
-      font.family: view.fontFamily
-      font.pixelSize: Style.font.heading
-      font.bold: true
-    }
-
-    Row {
-      spacing: Style.space(4)
-
-      Text {
-        visible: stat.icon !== ""
-        anchors.baseline: statLabel.baseline
-        textFormat: Text.PlainText
-        text: stat.icon
-        color: view.quiet
-        font.family: view.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      Text {
-        id: statLabel
-        textFormat: Text.PlainText
-        text: stat.label
-        color: view.quiet
-        font.family: view.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-    }
+  component Figure: HeroStat {
+    foreground: view.foreground
+    fontFamily: view.fontFamily
   }
 
-  // Two counts that share one bar: commits only here against commits only
-  // there, so the distance from the upstream is seen, not only read.
-  component SplitBar: Item {
-    id: split
-    property real ahead: 0
-    property real behind: 0
-    readonly property real total: Math.max(1e-9, split.ahead + split.behind)
-    implicitHeight: Style.space(4)
-
-    Rectangle {
-      anchors.fill: parent
-      radius: height / 2
-      color: Qt.rgba(view.foreground.r, view.foreground.g, view.foreground.b, 0.12)
-    }
-
-    // Both halves fade along the bar, out from their own end, so the two
-    // read as distances from the meeting point and not as two blocks.
-    Rectangle {
-      height: parent.height
-      width: Math.round(parent.width * split.ahead / split.total)
-      radius: height / 2
-      gradient: Gradient {
-        orientation: Gradient.Horizontal
-        GradientStop { position: 0.0; color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 1.0) }
-        GradientStop { position: 1.0; color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45) }
-      }
-    }
-
-    Rectangle {
-      anchors.right: parent.right
-      height: parent.height
-      width: Math.round(parent.width * split.behind / split.total)
-      radius: height / 2
-      gradient: Gradient {
-        orientation: Gradient.Horizontal
-        GradientStop { position: 0.0; color: Qt.rgba(view.foreground.r, view.foreground.g, view.foreground.b, 0.18) }
-        GradientStop { position: 1.0; color: Qt.rgba(view.foreground.r, view.foreground.g, view.foreground.b, 0.45) }
-      }
-    }
-  }
-
-  // One label and value line of the grid. A value that does not fit wraps
-  // under itself rather than eliding, because the end of a path or a remote
-  // is the part that says which one it is. A row that carries a bar draws
-  // it beneath its value.
-  component StatLine: Item {
-    id: line
-    property var row: ({})
-    readonly property bool hasBar: !!line.row.bar && (line.row.bar.ahead + line.row.bar.behind) > 0
-    width: parent ? parent.width : 0
-    implicitHeight: Math.max(lineLabel.implicitHeight, lineValue.implicitHeight)
-                    + (line.hasBar ? Style.space(4) + lineBar.implicitHeight : 0)
-
-    Text {
-      id: lineLabel
-      anchors.left: parent.left
-      anchors.top: parent.top
-      width: view.labelColumn
-      textFormat: Text.PlainText
-      elide: Text.ElideRight
-      text: line.row.label !== undefined ? line.row.label : ""
-      color: view.quiet
-      font.family: view.fontFamily
-      font.pixelSize: Style.font.caption
-    }
-
-    Text {
-      id: lineValue
-      anchors.left: lineLabel.right
-      anchors.right: parent.right
-      anchors.top: parent.top
-      textFormat: Text.PlainText
-      wrapMode: Text.WrapAnywhere
-      text: line.row.value !== undefined ? line.row.value : ""
-      color: line.row.tone !== undefined ? line.row.tone : view.foreground
-      font.family: view.fontFamily
-      font.pixelSize: Style.font.caption
-      font.bold: line.row.bold === true
-    }
-
-    SplitBar {
-      id: lineBar
-      visible: line.hasBar
-      anchors.left: lineLabel.right
-      anchors.right: parent.right
-      anchors.top: lineValue.bottom
-      anchors.topMargin: Style.space(4)
-      ahead: line.hasBar ? line.row.bar.ahead : 0
-      behind: line.hasBar ? line.row.bar.behind : 0
-    }
+  component Line: StatLine {
+    foreground: view.foreground
+    fontFamily: view.fontFamily
+    labelColumn: view.labelColumn
   }
 
   // ---------- the keyboard contract ----------
@@ -913,7 +790,7 @@ Column {
 
                       Repeater {
                         model: section.figures ? view.statsNumbers(section.figures) : []
-                        delegate: HeroStat {
+                        delegate: Figure {
                           required property var modelData
                           value: view.figure(modelData.value)
                           label: modelData.label
@@ -937,7 +814,7 @@ Column {
                         spacing: Style.space(3)
                         Repeater {
                           model: view.leftHalf(statsGrid.rows)
-                          delegate: StatLine { required property var modelData; row: modelData }
+                          delegate: Line { required property var modelData; row: modelData }
                         }
                       }
 
@@ -946,7 +823,7 @@ Column {
                         spacing: Style.space(3)
                         Repeater {
                           model: view.rightHalf(statsGrid.rows)
-                          delegate: StatLine { required property var modelData; row: modelData }
+                          delegate: Line { required property var modelData; row: modelData }
                         }
                       }
                     }
@@ -1018,7 +895,7 @@ Column {
                     // ---- repository and state: the grid
                     Repeater {
                       model: section.modelData.rows || []
-                      delegate: StatLine { required property var modelData; row: modelData }
+                      delegate: Line { required property var modelData; row: modelData }
                     }
                   }
                 }

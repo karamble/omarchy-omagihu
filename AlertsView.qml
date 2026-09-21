@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import qs.Commons
@@ -17,6 +19,8 @@ Column {
   // A dim as alpha over the foreground, so it stays lighter than the text on
   // a light theme as well as a dark one.
   readonly property color dim: Util.alpha(view.foreground, 0.7)
+  readonly property color body: Util.alpha(view.foreground, 0.85)
+  readonly property color quiet: Util.alpha(view.foreground, 0.6)
 
   readonly property var alerts: owner.alerts
   // The filters are declared once and drawn from, because the chip strip is
@@ -111,19 +115,39 @@ Column {
   function untilOf(a) {
     var ms = new Date(a.expiresAt).getTime() - Date.now()
     if (isNaN(ms)) return ""
-    if (ms <= 0) return "expired"
+    if (ms <= 0) return "already"
     var mins = Math.floor(ms / 60000)
-    if (mins < 60) return "expires in " + mins + "m"
+    if (mins < 60) return "in " + mins + "m"
     var hours = Math.floor(mins / 60)
-    if (hours < 48) return "expires in " + hours + "h"
-    return "expires in " + Math.floor(hours / 24) + "d"
+    if (hours < 48) return "in " + hours + "h"
+    return "in " + Math.floor(hours / 24) + "d"
   }
 
-  function deliveryOf(a) {
+  function wakesOf(a) {
     var to = String(a.deliverTo || "you")
-    if (to === "you") return "wakes you"
-    if (to === "repo") return "wakes whoever is in the checkout"
-    return "wakes " + to
+    if (to === "you") return "this machine"
+    if (to === "repo") return "whoever is in the checkout"
+    return to
+  }
+
+  // What a row says beneath its condition, as label and value rows in the
+  // same grid the repositories view uses: who it wakes, how long it stands,
+  // whose it is, why it was armed, and what went wrong on the way out.
+  function rowsOf(a) {
+    var out = []
+    out.push({ label: "wakes", value: view.wakesOf(a), tone: view.body })
+    var until = view.untilOf(a)
+    if (until !== "") out.push({ label: "expires", value: until, tone: until === "already" ? view.quiet : view.body })
+    if (!view.isYours(a)) out.push({ label: "armed by", value: String(a.armedBy), tone: view.body })
+    if (a.reason) out.push({ label: "reason", value: String(a.reason), tone: view.body })
+    if (a.state && a.state.deliveryError)
+      out.push({ label: "delivery", value: "failed: " + String(a.state.deliveryError), tone: Color.urgent })
+    return out
+  }
+
+  component Line: StatLine {
+    foreground: view.foreground
+    fontFamily: view.fontFamily
   }
 
   function badgesOf(a) {
@@ -249,6 +273,8 @@ Column {
     Repeater {
       model: view.filters
       delegate: Button {
+        required property var modelData
+        required property int index
         Layout.fillWidth: true
         text: modelData.label + " (" + view.countFor(modelData.key) + ")"
         selected: view.filter === modelData.key
@@ -328,6 +354,9 @@ Column {
     Repeater {
       model: view.rows
       delegate: ListRow {
+        id: watchRow
+        required property var modelData
+        required property int index
         width: alertColumn.width
         hasCursor: view.owner.cursor === index + 1
         actionIndex: view.owner.actionIndex
@@ -336,15 +365,19 @@ Column {
         urgent: modelData.status === "delivery-failed"
         fontFamily: view.fontFamily
         title: view.conditionOf(modelData)
-        subtitle: {
-          var bits = [view.deliveryOf(modelData), view.untilOf(modelData)]
-          if (!view.isYours(modelData)) bits.push("armed by " + modelData.armedBy)
-          if (modelData.reason) bits.push(String(modelData.reason))
-          if (modelData.state && modelData.state.deliveryError)
-            bits.push(String(modelData.state.deliveryError))
-          return bits.join("  ·  ")
-        }
         badges: view.badgesOf(modelData)
+        // The grid is always open: a board of a few watches has the room,
+        // and a delivery error is not something to hide behind an ellipsis.
+        disclosed: true
+        detailContent: Column {
+          width: parent ? parent.width : 0
+          spacing: Style.space(3)
+
+          Repeater {
+            model: view.rowsOf(watchRow.modelData)
+            delegate: Line { required property var modelData; row: modelData }
+          }
+        }
         // Only your own watches get a bin. Somebody else's is theirs to take
         // down, so the row says who owns it instead of offering the button.
         readonly property bool confirming: view.pendingDisarm === String(modelData.id)

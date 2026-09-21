@@ -93,6 +93,9 @@ Column {
 
   readonly property color foreground: owner.foreground
   readonly property string fontFamily: owner.fontFamily
+  // A dim as alpha over the foreground, so it stays lighter than the text on
+  // a light theme as well as a dark one.
+  readonly property color quiet: Util.alpha(form.foreground, 0.6)
 
   property string path: ""
   property string operator: ""
@@ -273,6 +276,7 @@ Column {
   PanelSectionHeader {
     text: "WATCH"
     foreground: form.foreground
+    color: form.quiet
     fontFamily: form.fontFamily
   }
 
@@ -295,7 +299,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: form.describes !== ""
     text: form.describes
-    color: Qt.darker(form.foreground, 1.4)
+    color: form.quiet
     font.family: form.fontFamily
     font.pixelSize: Style.font.caption
   }
@@ -404,6 +408,7 @@ Column {
     text: "ONLY WHEN"
     visible: form.fields.length > 0
     foreground: form.foreground
+    color: form.quiet
     fontFamily: form.fontFamily
   }
 
@@ -458,6 +463,7 @@ Column {
   PanelSectionHeader {
     text: "STANDS FOR"
     foreground: form.foreground
+    color: form.quiet
     fontFamily: form.fontFamily
   }
 
@@ -508,6 +514,7 @@ Column {
   PanelSectionHeader {
     text: "WAKES"
     foreground: form.foreground
+    color: form.quiet
     fontFamily: form.fontFamily
   }
 
@@ -528,7 +535,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: form.owner.agentNote !== ""
     text: "No agents to wake right now, so alerts land on the desktop."
-    color: Qt.darker(form.foreground, 1.4)
+    color: form.quiet
     font.family: form.fontFamily
     font.pixelSize: Style.font.caption
   }
@@ -549,7 +556,7 @@ Column {
     visible: form.editing
     text: "Editing " + form.editingId + ". Saving clears what it has learned, so "
         + "the next sample teaches it again."
-    color: Qt.darker(form.foreground, 1.4)
+    color: form.quiet
     font.family: form.fontFamily
     font.pixelSize: Style.font.caption
   }
