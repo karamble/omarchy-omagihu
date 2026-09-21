@@ -22,12 +22,22 @@ const (
 	fetchTimeout = 45 * time.Second
 )
 
-// SetFetch turns background fetching on or off and sets its cadence.
+// SetFetch turns background fetching on or off and sets its cadence. Replacing
+// the cadence of a running fetch wakes the loop, so the new cadence applies now
+// instead of when the old wait expires. The first configuration and a bare
+// on/off flip leave the schedule alone.
 func (w *Watcher) SetFetch(enabled bool, every time.Duration) {
+	every = max(every, minFetchEvery)
 	w.fetchOn.Store(enabled)
-	w.fetchEvery.Store(int64(max(every, minFetchEvery)))
-	w.logger.Info("background fetch configured",
-		"enabled", enabled, "every", max(every, minFetchEvery))
+	prev := w.fetchEvery.Swap(int64(every))
+	w.logger.Info("background fetch configured", "enabled", enabled, "every", every)
+
+	if enabled && prev != 0 && prev != int64(every) {
+		select {
+		case w.fetchNow <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // RunFetch keeps remote-tracking refs current until ctx is done.
