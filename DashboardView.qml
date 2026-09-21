@@ -65,7 +65,7 @@ Column {
   readonly property var facts: snap && snap.facts ? snap.facts : []
   readonly property int urgentFacts: {
     var n = 0
-    for (var i = 0; i < view.facts.length; i++) if (view.facts[i].severity === "urgent") n++
+    for (var i = 0; i < view.reconcileFacts.length; i++) if (view.reconcileFacts[i].severity === "urgent") n++
     return n
   }
 
@@ -79,12 +79,64 @@ Column {
     return out
   }
 
+  // The two fact kinds that duplicate a pull request row by design. They are
+  // exactly what puts a pull request in brokenPrs, so the row already says
+  // what they say. What it cannot say is the bit they carry: which checkout on
+  // this disk is sitting on that commit.
+  readonly property var joinedKinds: ["ci-red-on-head", "changes-requested"]
+
+  // Pull request url to the checkouts its joined facts name.
+  readonly property var checkoutsByPr: {
+    var out = ({})
+    var broken = ({})
+    for (var b = 0; b < view.brokenPrs.length; b++)
+      if (view.brokenPrs[b].url) broken[view.brokenPrs[b].url] = true
+    for (var i = 0; i < view.facts.length; i++) {
+      var f = view.facts[i]
+      if (view.joinedKinds.indexOf(f.kind) < 0 || !f.url || !broken[f.url]) continue
+      if (!out[f.url]) out[f.url] = []
+      if (f.path) out[f.url].push(f.path)
+    }
+    return out
+  }
+
+  // What the reconcile section still draws. A joined kind leaves only when a
+  // pull request row actually took it: one whose pull request is not broken
+  // has no row to attach to, and dropping it would lose the fact.
+  readonly property var reconcileFacts: {
+    var out = []
+    for (var i = 0; i < view.facts.length; i++) {
+      var f = view.facts[i]
+      if (view.joinedKinds.indexOf(f.kind) >= 0 && f.url && view.checkoutsByPr[f.url]) continue
+      out.push(f)
+    }
+    return out
+  }
+
+  // An inbox row saying what a review row above it already says. Only the
+  // review-requested reason folds, and only while the reviews section is
+  // actually drawn: a mention on the same pull request is different news.
+  readonly property var inboxShown: {
+    var drawn = ({})
+    if (view.showReviews)
+      for (var r = 0; r < view.reviews.length; r++)
+        if (view.reviews[r].url) drawn[view.reviews[r].url] = true
+    var out = []
+    for (var i = 0; i < view.inbox.length; i++) {
+      var n = view.inbox[i]
+      if (n.reason === "review_requested" && n.webUrl && drawn[n.webUrl]) continue
+      out.push(n)
+    }
+    return out
+  }
+
   readonly property bool showReviews: !view.isHidden("reviews") && reviews.length > 0
-  readonly property bool showIncoming: !view.isHidden("issues") && incoming.length > 0
+  readonly property bool showIncoming: !view.isHidden("incoming") && incoming.length > 0
   readonly property bool showBroken: !view.isHidden("broken") && brokenPrs.length > 0
-  readonly property bool showInbox: !view.isHidden("inbox") && inbox.length > 0
-  readonly property bool showFacts: !view.isHidden("reconcile") && facts.length > 0
-  readonly property bool showOpened: !view.isHidden("issues") && opened.length > 0
+  readonly property bool showInbox: !view.isHidden("inbox") && inboxShown.length > 0
+  // Reconcile has no chip of its own any more, so nothing folds it.
+  readonly property bool showFacts: reconcileFacts.length > 0
+  readonly property bool showOpened: !view.isHidden("opened") && opened.length > 0
 
   spacing: Style.space(10)
 
@@ -92,6 +144,23 @@ Column {
     if (!full) return ""
     var parts = String(full).split("/")
     return parts.length > 1 ? parts[1] : String(full)
+  }
+
+  // The checkout a joined fact names, as its last path component: the whole
+  // path does not fit beside a title at this width.
+  function baseName(path) {
+    if (!path) return ""
+    var parts = String(path).split("/")
+    return parts[parts.length - 1] || String(path)
+  }
+
+  // Where this pull request is checked out, for the row that took its facts.
+  function checkoutPhrase(url) {
+    var at = view.checkoutsByPr[url]
+    if (!at || at.length === 0) return ""
+    var first = view.baseName(at[0])
+    if (!first) return ""
+    return "checked out in " + first + (at.length > 1 ? " +" + (at.length - 1) : "")
   }
 
   function ago(iso) {
@@ -188,12 +257,18 @@ Column {
   // every entry the sections left showing, in the order they draw, each with
   // one action, which is to open it on GitHub; then the button at the foot.
   // The urgent flag is what makes a folded chip loud.
+  // One chip, one section. The reconcile chip went with the rows it counted,
+  // and the issues chip became two, because it folded two sections at once
+  // and its count could never say which of them it meant.
   readonly property var filters: [
     { key: "reviews", label: "Reviews", count: view.reviews.length, urgent: view.reviews.length > 0 },
     { key: "broken", label: "Needs fixing", count: view.brokenPrs.length, urgent: view.brokenPrs.length > 0 },
-    { key: "inbox", label: "Inbox", count: view.inbox.length, urgent: false },
-    { key: "reconcile", label: "Reconcile", count: view.facts.length, urgent: view.urgentFacts > 0 },
-    { key: "issues", label: "Issues", count: view.incoming.length + view.opened.length, urgent: view.incoming.length > 0 }
+    { key: "inbox", label: "Inbox", count: view.inboxShown.length, urgent: false },
+    // "Reported", not "On yours": the reviews section already badges its own
+    // incoming pull requests ON YOURS, and a chip counting only the issues
+    // would disagree with the badges above it.
+    { key: "incoming", label: "Reported", count: view.incoming.length, urgent: view.incoming.length > 0 },
+    { key: "opened", label: "Opened", count: view.opened.length, urgent: false }
   ]
 
   // How many of the sections this view knows are folded. A key left in the
@@ -209,8 +284,8 @@ Column {
   readonly property int incomingOffset: view.reviewOffset + (view.showReviews ? view.reviews.length : 0)
   readonly property int brokenOffset: view.incomingOffset + (view.showIncoming ? view.incoming.length : 0)
   readonly property int factOffset: view.brokenOffset + (view.showBroken ? view.brokenPrs.length : 0)
-  readonly property int inboxOffset: view.factOffset + (view.showFacts ? view.facts.length : 0)
-  readonly property int openedOffset: view.inboxOffset + (view.showInbox ? view.inbox.length : 0)
+  readonly property int inboxOffset: view.factOffset + (view.showFacts ? view.reconcileFacts.length : 0)
+  readonly property int openedOffset: view.inboxOffset + (view.showInbox ? view.inboxShown.length : 0)
   readonly property int moreRow: view.openedOffset + (view.showOpened ? view.opened.length : 0)
 
   readonly property int rowCount: view.moreRow + 1
@@ -242,9 +317,9 @@ Column {
     else if (view.showBroken && row < view.factOffset)
       url = view.brokenPrs[row - view.brokenOffset].url
     else if (view.showFacts && row < view.inboxOffset)
-      url = view.facts[row - view.factOffset].url
+      url = view.reconcileFacts[row - view.factOffset].url
     else if (view.showInbox && row < view.openedOffset)
-      url = view.inbox[row - view.inboxOffset].webUrl
+      url = view.inboxShown[row - view.inboxOffset].webUrl
     else if (view.showOpened)
       url = view.opened[row - view.openedOffset].url
     if (url) view.owner.openUrl(url)
@@ -410,7 +485,15 @@ Column {
         urgent: true
         fontFamily: view.fontFamily
         title: view.shortRepo(modelData.repo) + " #" + modelData.number + "  " + modelData.title
-        subtitle: modelData.repo + " · " + modelData.headRef + " · " + view.ago(modelData.updatedAt)
+        // The last phrase is what the reconcile row used to be: this pull
+        // request is checked out here, which is the one thing the row itself
+        // cannot say.
+        subtitle: {
+          var bits = [modelData.repo, modelData.headRef, view.ago(modelData.updatedAt)]
+          var at = view.checkoutPhrase(modelData.url)
+          if (at) bits.push(at)
+          return bits.join(" · ")
+        }
         badges: view.prBadges(modelData)
         onActivated: view.owner.openUrl(modelData.url)
       }
@@ -425,7 +508,7 @@ Column {
     }
 
     Repeater {
-      model: view.showFacts ? view.facts : []
+      model: view.showFacts ? view.reconcileFacts : []
       delegate: ListRow {
         required property var modelData
         required property int index
@@ -456,7 +539,7 @@ Column {
     }
 
     Repeater {
-      model: view.showInbox ? view.inbox : []
+      model: view.showInbox ? view.inboxShown : []
       delegate: ListRow {
         required property var modelData
         required property int index
