@@ -250,13 +250,15 @@ func (s *Server) health(snap *poll.Snapshot, repos *local.Snapshot) healthRespon
 		}
 	}
 
-	resp.Repos = len(repos.Repos)
-	resp.ScannedAt = repos.TakenAt
+	// A prunable worktree registration is listed for housekeeping, but it is
+	// not a checkout being watched.
 	for _, r := range repos.Repos {
-		if r.AtRisk() {
-			resp.ReposRisk++
+		if r.Prunable == "" {
+			resp.Repos++
 		}
 	}
+	resp.ScannedAt = repos.TakenAt
+	resp.ReposRisk = local.RepositoriesAtRisk(repos.Repos)
 	return resp
 }
 
@@ -860,7 +862,9 @@ func (s *Server) handleRecycleToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRepos exposes the local plane: every watched checkout, at-risk first.
+// handleRepos exposes the local plane: every watched checkout, grouped by
+// repository with those at risk first. risk=1 keeps only the checkouts with
+// unpushed commits or an interrupted operation.
 func (s *Server) handleRepos(w http.ResponseWriter, r *http.Request) {
 	snap := s.watcher.Snapshot()
 	if r.URL.Query().Get("risk") == "1" {

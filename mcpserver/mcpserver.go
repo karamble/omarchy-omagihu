@@ -145,8 +145,10 @@ func register(s *mcp.Server, src Source) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "omagihu_repos",
-		Description: "Every watched local checkout: branch, unpushed commits, uncommitted " +
-			"changes, interrupted rebases or merges, stashes and distance from upstream.",
+		Description: "Every watched local checkout, one entry each: branch, unpushed commits, " +
+			"uncommitted changes, interrupted rebases or merges, stashes and distance from " +
+			"upstream. Worktrees of one repository share a group; atRisk and dirty carry " +
+			"the daemon's own classification.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, reposOut, error) {
 		snap := src.Local.Snapshot()
 		return nil, reposOut{Status: src.status(), Count: len(snap.Repos), Repos: snap.Repos}, nil
@@ -154,8 +156,9 @@ func register(s *mcp.Server, src Source) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "omagihu_risk",
-		Description: "Only the local checkouts holding work at risk: unpushed commits, an " +
-			"interrupted git operation, or uncommitted changes.",
+		Description: "Only the local checkouts holding work that would be lost: unpushed " +
+			"commits or an interrupted git operation. Uncommitted changes alone do not " +
+			"qualify; omagihu_repos shows those.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, reposOut, error) {
 		snap := src.Local.Snapshot()
 		var risky []local.Repo

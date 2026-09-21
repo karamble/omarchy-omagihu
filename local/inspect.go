@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,6 +26,8 @@ func Inspect(ctx context.Context, path string) Repo {
 		Name:       filepath.Base(path),
 		ObservedAt: time.Now(),
 	}
+
+	repo.Group, repo.Main = commonDir(path)
 
 	statusOut, err := runGit(ctx, path, "status", "--porcelain=v2", "-z", "--branch")
 	if err != nil {
@@ -212,6 +215,86 @@ func detectOperation(repoPath string) Operation {
 	return OpNone
 }
 
+// commonDir returns the git directory every worktree of a repository shares,
+// which is what git rev-parse --git-common-dir answers, and whether this
+// checkout owns it. A linked worktree's own git directory carries a commondir
+// file pointing back at the owner's; anything else is its own common dir.
+// Read from disk rather than asked, so grouping costs no process.
+func commonDir(repoPath string) (common string, main bool) {
+	dir, err := resolveGitDir(repoPath)
+	if err != nil {
+		return "", false
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "commondir"))
+	if err != nil {
+		return realPath(dir), true
+	}
+	target := strings.TrimSpace(string(raw))
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(dir, target)
+	}
+	return realPath(target), false
+}
+
+// realPath resolves symlinks so the same directory reached two ways is one
+// key, and one path compares equal to what git prints for it.
+func realPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
+}
+
+// hasLinkedWorktrees reports whether a repository has ever registered a
+// worktree, which is where git keeps them. A registration can outlive its
+// directory, so this is checked on disk rather than inferred from discovery.
+func hasLinkedWorktrees(common string) bool {
+	entries, err := os.ReadDir(filepath.Join(common, "worktrees"))
+	return err == nil && len(entries) > 0
+}
+
+// worktree is one entry of git worktree list --porcelain.
+type worktree struct {
+	Path     string
+	Branch   string
+	Main     bool
+	Prunable string
+}
+
+// listWorktrees asks git which checkouts share a repository, from any one of
+// them. The first entry is always the main worktree.
+func listWorktrees(ctx context.Context, path string) ([]worktree, error) {
+	out, err := runGit(ctx, path, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktrees(out), nil
+}
+
+// parseWorktrees reads the porcelain format: one attribute per line, a blank
+// line between entries.
+func parseWorktrees(out string) []worktree {
+	var list []worktree
+	var cur *worktree
+	for line := range strings.SplitSeq(out, "\n") {
+		key, value, _ := strings.Cut(line, " ")
+		switch key {
+		case "worktree":
+			list = append(list, worktree{Path: realPath(value), Main: len(list) == 0})
+			cur = &list[len(list)-1]
+		case "branch":
+			if cur != nil {
+				cur.Branch = strings.TrimPrefix(value, "refs/heads/")
+			}
+		case "prunable":
+			if cur != nil {
+				cur.Prunable = value
+			}
+		}
+	}
+	return list
+}
+
 // resolveGitDir returns the real .git directory, following the "gitdir:"
 // pointer file used by worktrees and submodules.
 func resolveGitDir(repoPath string) (string, error) {
@@ -237,8 +320,22 @@ func resolveGitDir(repoPath string) (string, error) {
 	return target, nil
 }
 
+// gitRuns counts git invocations by subcommand, so a test can measure what a
+// scan costs rather than assume it.
+var gitRuns struct {
+	sync.Mutex
+	n map[string]int
+}
+
 // runGit executes git in dir with its own deadline.
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	gitRuns.Lock()
+	if gitRuns.n == nil {
+		gitRuns.n = make(map[string]int)
+	}
+	gitRuns.n[args[0]]++
+	gitRuns.Unlock()
+
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 

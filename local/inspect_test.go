@@ -96,8 +96,9 @@ func TestInspectCountsWorkingTreeStates(t *testing.T) {
 	if repo.Untracked < 1 {
 		t.Errorf("Untracked = %d, want at least 1", repo.Untracked)
 	}
-	if !repo.AtRisk() {
-		t.Error("AtRisk() = false for a dirty repo")
+	// Dirt is the normal state of a machine being used, not work at risk.
+	if repo.AtRisk() {
+		t.Error("AtRisk() = true for a repo that is only dirty")
 	}
 }
 

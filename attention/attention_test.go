@@ -129,3 +129,38 @@ func TestBroken(t *testing.T) {
 		})
 	}
 }
+
+// TestDirtyAloneDoesNotLightTheBar is the point of the tier split: an edited
+// file is the normal state of a machine being used. It stays dirty, and
+// alertable as such, but the bar reports nothing.
+func TestDirtyAloneDoesNotLightTheBar(t *testing.T) {
+	dirty := local.Repo{Path: "/p", Modified: 3, Untracked: 1}
+	if !dirty.Dirty() {
+		t.Fatal("fixture is not dirty")
+	}
+	got := Resolve(Input{Repos: []local.Repo{dirty}})
+	if got.Tier != TierClear || got.Level != "clear" || got.ReposAtRisk != 0 {
+		t.Errorf("Resolve = tier %d level %q reposAtRisk %d, want clear with nothing at risk", got.Tier, got.Level, got.ReposAtRisk)
+	}
+}
+
+// TestWorktreesCountAsOneRepository pins the count: two checkouts of one
+// repository with unpushed work are one repository needing attention, while
+// the commits themselves are still summed across both.
+func TestWorktreesCountAsOneRepository(t *testing.T) {
+	got := Resolve(Input{Repos: []local.Repo{
+		{Path: "/thing", Group: "/thing/.git", Main: true, Modified: 1},
+		{Path: "/wt-a", Group: "/thing/.git", Unpushed: 2},
+		{Path: "/wt-b", Group: "/thing/.git", Unpushed: 3, Operation: local.OpRebase},
+		{Path: "/other", Group: "/other/.git", Main: true, Unpushed: 1},
+	}})
+	if got.ReposAtRisk != 2 || got.Count != 2 {
+		t.Errorf("ReposAtRisk = %d, Count = %d, want 2: a group counts once", got.ReposAtRisk, got.Count)
+	}
+	if got.UnpushedTotal != 6 {
+		t.Errorf("UnpushedTotal = %d, want 6 summed across every checkout", got.UnpushedTotal)
+	}
+	if got.Interrupted != 1 {
+		t.Errorf("Interrupted = %d, want 1", got.Interrupted)
+	}
+}

@@ -70,7 +70,7 @@ func Catalogue() []Leaf {
 		{Path: "attention.unread", Kind: KindNumber, Operators: numberOps,
 			Describes: "unread notifications"},
 		{Path: "attention.reposAtRisk", Kind: KindNumber, Operators: numberOps,
-			Describes: "checkouts holding uncommitted or unpushed work"},
+			Describes: "repositories holding unpushed commits or an interrupted operation, counted once however many checkouts"},
 		{Path: "attention.unpushedTotal", Kind: KindNumber, Operators: numberOps,
 			Describes: "commits that exist only on this machine"},
 		{Path: "attention.interrupted", Kind: KindNumber, Operators: numberOps,

@@ -25,7 +25,8 @@ const (
 	TierReconcile
 	// TierInbox: unread notifications.
 	TierInbox
-	// TierLocal: work at risk on this machine only.
+	// TierLocal: work at risk on this machine only: unpushed commits or an
+	// interrupted operation. Uncommitted changes alone never light it.
 	TierLocal
 	// TierClear: nothing wants you.
 	TierClear
@@ -86,10 +87,10 @@ func Resolve(in Input) State {
 			s.Reconcile++
 		}
 	}
+	// One repository counts once however many of its checkouts are at risk;
+	// the commits and operations themselves are summed across all of them.
+	s.ReposAtRisk = local.RepositoriesAtRisk(in.Repos)
 	for _, r := range in.Repos {
-		if r.AtRisk() {
-			s.ReposAtRisk++
-		}
 		s.UnpushedTotal += r.Unpushed
 		if r.Operation != local.OpNone {
 			s.Interrupted++

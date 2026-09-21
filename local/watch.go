@@ -41,6 +41,10 @@ type Watcher struct {
 
 	mu    sync.Mutex
 	repos map[string]Repo
+	// prunable holds the worktree registrations git reports whose directory
+	// is gone, keyed by that path. Discovery cannot find them, so they live
+	// beside the checkouts it did find.
+	prunable map[string]Repo
 
 	snap   atomic.Pointer[Snapshot]
 	paused atomic.Bool
@@ -109,6 +113,7 @@ func NewWatcher(cfg Config, logger *slog.Logger, refresh, rediscover time.Durati
 		refresh:    max(refresh, minRefresh),
 		rediscover: max(rediscover, minRediscover),
 		repos:      make(map[string]Repo),
+		prunable:   make(map[string]Repo),
 		resumed:    make(chan struct{}, 1),
 		fetchNow:   make(chan struct{}, 1),
 	}
@@ -291,6 +296,7 @@ func (w *Watcher) inspectAll(ctx context.Context, paths []string) {
 		})
 	}
 	_ = g.Wait()
+	listed := w.groupWorktrees(ctx, results)
 
 	w.mu.Lock()
 	for _, r := range results {
@@ -298,14 +304,77 @@ func (w *Watcher) inspectAll(ctx context.Context, paths []string) {
 			w.repos[r.Path] = r
 		}
 	}
+	for group, entries := range listed {
+		for path, r := range w.prunable {
+			if r.Group == group {
+				delete(w.prunable, path)
+			}
+		}
+		for _, r := range entries {
+			w.prunable[r.Path] = r
+		}
+	}
 	w.mu.Unlock()
 	w.publish()
 }
 
+// groupWorktrees asks git, once per repository that has ever registered a
+// worktree, which checkouts belong to it. It confirms which member is the
+// main one and returns, per group listed, the registrations whose directory
+// is gone: those are the checkouts discovery can never walk to.
+func (w *Watcher) groupWorktrees(ctx context.Context, results []Repo) map[string][]Repo {
+	members := make(map[string][]int)
+	for i, r := range results {
+		if r.Group != "" && r.Error == "" {
+			members[r.Group] = append(members[r.Group], i)
+		}
+	}
+	listed := make(map[string][]Repo)
+	for group, idx := range members {
+		if !hasLinkedWorktrees(group) {
+			continue
+		}
+		trees, err := listWorktrees(ctx, results[idx[0]].Path)
+		if err != nil {
+			w.logger.Debug("worktree list failed", "repo", results[idx[0]].Path, "err", err)
+			continue
+		}
+		listed[group] = nil
+		for _, t := range trees {
+			if t.Prunable != "" {
+				listed[group] = append(listed[group], Repo{
+					Path: t.Path, Name: filepath.Base(t.Path), Branch: t.Branch,
+					Group: group, Prunable: t.Prunable, ObservedAt: time.Now(),
+				})
+				continue
+			}
+			for _, i := range idx {
+				if realPath(results[i].Path) == t.Path {
+					results[i].Main = t.Main
+				}
+			}
+		}
+	}
+	return listed
+}
+
+// forget drops a checkout that discovery no longer finds, and the prunable
+// registrations of its repository once no member is left to list them.
 func (w *Watcher) forget(path string) {
 	w.mu.Lock()
+	defer w.mu.Unlock()
+	group := w.repos[path].Group
 	delete(w.repos, path)
-	w.mu.Unlock()
+	for _, r := range w.repos {
+		if r.Group == group {
+			return
+		}
+	}
+	for p, r := range w.prunable {
+		if r.Group == group {
+			delete(w.prunable, p)
+		}
+	}
 }
 
 // publish rebuilds the immutable snapshot readers see.
@@ -319,18 +388,68 @@ func (w *Watcher) publish() {
 	for _, r := range w.repos {
 		snap.Repos = append(snap.Repos, r)
 	}
+	for _, r := range w.prunable {
+		snap.Repos = append(snap.Repos, r)
+	}
 	w.mu.Unlock()
 
-	// At-risk repositories first, then by name, so the panel has a stable order
-	// that puts the things needing attention at the top.
-	slices.SortFunc(snap.Repos, func(a, b Repo) int {
-		if a.AtRisk() != b.AtRisk() {
-			if a.AtRisk() {
+	sortRepos(snap.Repos)
+	w.snap.Store(snap)
+}
+
+// sortRepos orders repositories at risk first, then by name, and keeps a
+// repository's checkouts together with the main one first, so the panel has
+// a stable order it can group without re-sorting.
+func sortRepos(repos []Repo) {
+	// A group sorts by its main checkout's name, or its first name when the
+	// main one is not watched, and is at risk when any member is.
+	risk := make(map[string]bool)
+	name := make(map[string]string)
+	for _, r := range repos {
+		if r.Main {
+			name[r.GroupKey()] = r.Name
+		}
+	}
+	for _, r := range repos {
+		key := r.GroupKey()
+		risk[key] = risk[key] || r.AtRisk()
+		if n, ok := name[key]; !ok || (!hasMain(repos, key) && r.Name < n) {
+			name[key] = r.Name
+		}
+	}
+	slices.SortFunc(repos, func(a, b Repo) int {
+		ka, kb := a.GroupKey(), b.GroupKey()
+		if risk[ka] != risk[kb] {
+			if risk[ka] {
 				return -1
 			}
 			return 1
 		}
-		return strings.Compare(a.Name, b.Name)
+		if c := strings.Compare(name[ka], name[kb]); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.GroupKey(), b.GroupKey()); c != 0 {
+			return c
+		}
+		if a.Main != b.Main {
+			if a.Main {
+				return -1
+			}
+			return 1
+		}
+		if c := strings.Compare(a.Name, b.Name); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Path, b.Path)
 	})
-	w.snap.Store(snap)
+}
+
+// hasMain reports whether a group's main checkout is among the repos.
+func hasMain(repos []Repo, key string) bool {
+	for _, r := range repos {
+		if r.Main && r.GroupKey() == key {
+			return true
+		}
+	}
+	return false
 }

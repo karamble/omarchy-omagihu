@@ -5,6 +5,7 @@ package local
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -62,13 +63,23 @@ type Commit struct {
 	At      time.Time `json:"at,omitzero"`
 }
 
-// Repo is everything known about one checkout.
+// Repo is everything known about one checkout. A repository with worktrees
+// is several checkouts sharing one Group.
 type Repo struct {
 	Path     string `json:"path"`
 	Name     string `json:"name"`
 	Branch   string `json:"branch"`
 	Upstream string `json:"upstream,omitempty"`
 	Detached bool   `json:"detached,omitempty"`
+
+	// Group is the repository this checkout belongs to: its common git
+	// directory, shared by every worktree. Main marks the checkout that owns
+	// it. Prunable is git's reason when a registered worktree's directory is
+	// gone; such an entry has no state of its own and is not a checkout
+	// discovery could find.
+	Group    string `json:"group"`
+	Main     bool   `json:"main,omitempty"`
+	Prunable string `json:"prunable,omitempty"`
 
 	Ahead  int `json:"ahead"`
 	Behind int `json:"behind"`
@@ -102,10 +113,43 @@ func (r Repo) Dirty() bool {
 	return r.Staged+r.Modified+r.Deleted+r.Untracked+r.Conflicted > 0
 }
 
-// AtRisk reports whether this repo holds something a person would not want to
-// lose or forget: unpushed commits, an interrupted operation, or dirt.
+// AtRisk reports work that would be lost: commits that exist only here, or
+// an operation left half finished. Dirt on its own is the normal state of a
+// machine being used and does not count.
 func (r Repo) AtRisk() bool {
-	return r.Unpushed > 0 || r.Operation != OpNone || r.Dirty()
+	return r.Unpushed > 0 || r.Operation != OpNone
+}
+
+// GroupKey identifies the repository this checkout belongs to, falling back
+// to the path for an entry that was never grouped.
+func (r Repo) GroupKey() string {
+	if r.Group != "" {
+		return r.Group
+	}
+	return r.Path
+}
+
+// MarshalJSON adds the classification to the wire form, so a reader shows
+// what the daemon decided rather than recomputing it and drifting.
+func (r Repo) MarshalJSON() ([]byte, error) {
+	type plain Repo
+	return json.Marshal(struct {
+		plain
+		AtRisk bool `json:"atRisk"`
+		Dirty  bool `json:"dirty"`
+	}{plain(r), r.AtRisk(), r.Dirty()})
+}
+
+// RepositoriesAtRisk counts the repositories holding work at risk: a group
+// counts once however many of its checkouts qualify.
+func RepositoriesAtRisk(repos []Repo) int {
+	groups := make(map[string]struct{})
+	for _, r := range repos {
+		if r.AtRisk() {
+			groups[r.GroupKey()] = struct{}{}
+		}
+	}
+	return len(groups)
 }
 
 // Snapshot is a consistent read of every watched repository.
