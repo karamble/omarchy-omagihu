@@ -209,7 +209,7 @@ for the one thing a count cannot say: that a single pull request has gone quiet.
 
 An alarm goes to a herdr agent, to whichever agent is working inside the
 checkout it concerns, or to your desktop. It carries the condition, the time and
-the reason you wrote, and **no values** — whoever is woken reads omagihu itself
+the reason you wrote, and **no values**: whoever is woken reads omagihu itself
 through the MCP tools. Alerts observe and ring; nothing is pushed, merged,
 closed or marked read because one fired.
 

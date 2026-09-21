@@ -185,7 +185,7 @@ Column {
       out.push({ text: "CI RUNNING", tone: Color.accent })
 
     if (pr.reviewDecision === "CHANGES_REQUESTED")
-      out.push({ text: "CHANGES", tone: Color.urgent, loud: true })
+      out.push({ text: "SENT BACK", tone: Color.urgent, loud: true })
     else if (pr.reviewDecision === "APPROVED")
       out.push({ text: "APPROVED", tone: view.owner.toneOk })
 

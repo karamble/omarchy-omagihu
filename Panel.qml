@@ -205,7 +205,7 @@ Panel {
     return ({
       "missing-work": "MISSING WORK",
       "ci-red-on-head": "CI RED HERE",
-      "changes-requested": "CHANGES",
+      "changes-requested": "SENT BACK",
       "stale-branch": "MERGED",
       "fork-behind": "FORK BEHIND",
       "detached-work": "DETACHED WORK",
