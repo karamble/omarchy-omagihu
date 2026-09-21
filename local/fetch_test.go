@@ -64,7 +64,11 @@ func TestSetFetchSwitchAloneLeavesScheduleAlone(t *testing.T) {
 		t.Fatal("a cadence change while off must not wake the loop")
 	}
 	w.SetFetch(true, 5*time.Minute)
+	if !nudged(w) {
+		t.Fatal("turning fetching on must wake the loop")
+	}
+	w.SetFetch(true, 5*time.Minute)
 	if nudged(w) {
-		t.Fatal("turning fetching on without changing the cadence must not wake the loop")
+		t.Fatal("reconfiguring with the cadence it already had must not wake the loop")
 	}
 }

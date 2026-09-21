@@ -22,17 +22,21 @@ const (
 	fetchTimeout = 45 * time.Second
 )
 
-// SetFetch turns background fetching on or off and sets its cadence. Replacing
-// the cadence of a running fetch wakes the loop, so the new cadence applies now
-// instead of when the old wait expires. The first configuration and a bare
-// on/off flip leave the schedule alone.
+// SetFetch turns background fetching on or off and sets its cadence. Switching
+// fetching on, or changing the cadence of a running fetch, wakes the loop so
+// the change applies now instead of when the old wait expires.
+//
+// The first configuration never wakes it: ApplyStored calls this at daemon
+// start, and fetching every repository at boot is what the slow default exists
+// to avoid. Turning fetching off, or reconfiguring it with the cadence it
+// already had, leaves the schedule alone.
 func (w *Watcher) SetFetch(enabled bool, every time.Duration) {
 	every = max(every, minFetchEvery)
-	w.fetchOn.Store(enabled)
+	wasOn := w.fetchOn.Swap(enabled)
 	prev := w.fetchEvery.Swap(int64(every))
 	w.logger.Info("background fetch configured", "enabled", enabled, "every", every)
 
-	if enabled && prev != 0 && prev != int64(every) {
+	if enabled && prev != 0 && (!wasOn || prev != int64(every)) {
 		select {
 		case w.fetchNow <- struct{}{}:
 		default:
