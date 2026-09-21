@@ -41,6 +41,9 @@ type Watcher struct {
 
 	mu    sync.Mutex
 	repos map[string]Repo
+	// watched maps each watched checkout to the git directories its events
+	// arrive from, which for a linked worktree are not under its own path.
+	watched map[string]gitDirs
 	// prunable holds the worktree registrations git reports whose directory
 	// is gone, keyed by that path. Discovery cannot find them, so they live
 	// beside the checkouts it did find.
@@ -114,6 +117,7 @@ func NewWatcher(cfg Config, logger *slog.Logger, refresh, rediscover time.Durati
 		rediscover: max(rediscover, minRediscover),
 		repos:      make(map[string]Repo),
 		prunable:   make(map[string]Repo),
+		watched:    make(map[string]gitDirs),
 		resumed:    make(chan struct{}, 1),
 		fetchNow:   make(chan struct{}, 1),
 	}
@@ -161,7 +165,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if repo := w.repoFor(event.Name, paths); repo != "" {
+			for _, repo := range w.reposFor(event.Name) {
 				pending[repo] = struct{}{}
 				debounceC = time.After(debounce)
 			}
@@ -239,40 +243,123 @@ func (w *Watcher) rescan(ctx context.Context, fsw *fsnotify.Watcher, old []strin
 	return paths
 }
 
-// watch adds the .git directory and its heads, which is where git operations
-// leave their traces. The working tree itself is deliberately not watched: it
-// would mean recursive watches over every source file for little gain, since
-// the refresh timer already catches edits.
+// gitDirs is where one checkout's git state lives: its own git directory,
+// and the common one its branches are written under. For a plain checkout
+// the two are the same.
+type gitDirs struct {
+	own    string
+	common string
+}
+
+// watch adds the checkout's git directory and the common heads, which is
+// where git operations leave their traces. A linked worktree's own directory
+// sits under the main checkout's, and its branch moves in the common
+// directory, so both are watched and both are remembered for reposFor. The
+// working tree itself is deliberately not watched: it would mean recursive
+// watches over every source file for little gain, since the refresh timer
+// already catches edits.
 func (w *Watcher) watch(fsw *fsnotify.Watcher, repoPath string) {
 	dir, err := resolveGitDir(repoPath)
 	if err != nil {
 		return
 	}
-	for _, p := range []string{dir, filepath.Join(dir, "refs", "heads")} {
+	common, _ := commonDir(repoPath)
+	if common == "" {
+		common = realPath(dir)
+	}
+	dirs := gitDirs{own: realPath(dir), common: common}
+	for _, p := range []string{dirs.own, filepath.Join(dirs.common, "refs", "heads")} {
 		if err := fsw.Add(p); err != nil {
 			w.logger.Debug("cannot watch path", "path", p, "err", err)
 		}
 	}
+	w.mu.Lock()
+	w.watched[repoPath] = dirs
+	w.mu.Unlock()
 }
 
+// unwatch drops a checkout's watches, keeping the common heads while another
+// checkout of the same repository still needs them.
 func (w *Watcher) unwatch(fsw *fsnotify.Watcher, repoPath string) {
-	dir, err := resolveGitDir(repoPath)
-	if err != nil {
-		return
-	}
-	for _, p := range []string{dir, filepath.Join(dir, "refs", "heads")} {
-		_ = fsw.Remove(p)
-	}
-}
-
-// repoFor maps a changed path back to the repository that owns it.
-func (w *Watcher) repoFor(changed string, paths []string) string {
-	for _, p := range paths {
-		if strings.HasPrefix(changed, p+string(filepath.Separator)) {
-			return p
+	w.mu.Lock()
+	dirs, ok := w.watched[repoPath]
+	delete(w.watched, repoPath)
+	shared := false
+	for _, other := range w.watched {
+		if other.common == dirs.common {
+			shared = true
 		}
 	}
-	return ""
+	w.mu.Unlock()
+	if !ok {
+		return
+	}
+	_ = fsw.Remove(dirs.own)
+	if !shared {
+		_ = fsw.Remove(filepath.Join(dirs.common, "refs", "heads"))
+	}
+}
+
+// reposFor maps a changed path back to the checkouts it belongs to. A write
+// inside a git directory names its checkout, the deepest match winning so a
+// worktree's directory is not read as its main checkout's. A branch written
+// under the common heads names the checkout on that branch, or every
+// checkout of the repository when none is, and so does a rewrite of
+// packed-refs, which can move any branch at once.
+func (w *Watcher) reposFor(changed string) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Branch writes come first: the common heads sit inside the main
+	// checkout's own directory, so they would otherwise read as its own.
+	for _, dirs := range w.watched {
+		heads := filepath.Join(dirs.common, "refs", "heads")
+		var branch string
+		switch {
+		case under(changed, heads):
+			branch = strings.TrimSuffix(strings.TrimPrefix(changed, heads+string(filepath.Separator)), ".lock")
+		// Only the packed file itself: git takes packed-refs.lock on every
+		// commit from any checkout without moving a ref, and that must wake
+		// nobody, least of all the main checkout it happens to sit in.
+		case filepath.Base(changed) == "packed-refs.lock" && filepath.Dir(changed) == dirs.common:
+			return nil
+		case filepath.Base(changed) == "packed-refs" && filepath.Dir(changed) == dirs.common:
+		default:
+			continue
+		}
+		var members, onBranch []string
+		for path, d := range w.watched {
+			if d.common != dirs.common {
+				continue
+			}
+			members = append(members, path)
+			if branch != "" && w.repos[path].Branch == branch {
+				onBranch = append(onBranch, path)
+			}
+		}
+		if len(onBranch) > 0 {
+			return onBranch
+		}
+		return members
+	}
+
+	// Otherwise the deepest git directory containing the path owns it, so a
+	// worktree's directory is not read as the main checkout's around it.
+	var owner string
+	for path, dirs := range w.watched {
+		if under(changed, dirs.own) && (owner == "" || len(dirs.own) > len(w.watched[owner].own)) {
+			owner = path
+		}
+	}
+	if owner == "" {
+		return nil
+	}
+	return []string{owner}
+}
+
+// under reports whether path lies inside dir.
+func under(path, dir string) bool {
+	return dir != "" && strings.HasPrefix(path, dir+string(filepath.Separator))
 }
 
 // inspectAll re-reads the given repositories with bounded concurrency, then
