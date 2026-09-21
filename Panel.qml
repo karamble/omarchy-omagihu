@@ -179,6 +179,22 @@ Panel {
   // from the accent colour used for merely informational rows.
   readonly property color toneOk: "#22c55e"
 
+  // One label per fact kind, read by every view, so the same drift never
+  // wears two names. "FORK BEHIND" rather than "BEHIND": the repositories
+  // view already says "N BEHIND" for a branch trailing its tracking ref.
+  function factLabel(kind) {
+    return ({
+      "missing-work": "MISSING WORK",
+      "ci-red-on-head": "CI RED HERE",
+      "changes-requested": "CHANGES",
+      "stale-branch": "MERGED",
+      "fork-behind": "FORK BEHIND",
+      "detached-work": "DETACHED WORK",
+      "no-remote": "NO REMOTE",
+      "pr-base-moved": "BASE MOVED"
+    })[kind] || String(kind).toUpperCase()
+  }
+
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
   // A closed environment for every child of the panel.
   readonly property var childEnv: ({

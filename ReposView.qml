@@ -14,10 +14,14 @@ Column {
   required property var owner
   property var snap: null
 
-  // "risk", "unpushed", "dirty", "interrupted", "all"
+  // "risk", "dirty", "interrupted", "all"
   property string filter: "risk"
   // Group keys the user has opened.
   property var expanded: ({})
+  // Rows whose folded badges are shown. A look, not a setting: it lives as
+  // long as the view does, like expanded.
+  property var badgesOpen: ({})
+  readonly property int badgeCap: 4
 
   readonly property color foreground: owner.foreground
   readonly property string fontFamily: owner.fontFamily
@@ -55,18 +59,8 @@ Column {
     return m
   }
 
-  function factLabel(kind) {
-    return ({
-      "missing-work": "MISSING WORK",
-      "ci-red-on-head": "CI RED HERE",
-      "changes-requested": "CHANGES",
-      "stale-branch": "MERGED",
-      "fork-behind": "BEHIND UPSTREAM",
-      "detached-work": "DETACHED WORK",
-      "no-remote": "NO REMOTE",
-      "pr-base-moved": "BASE MOVED"
-    })[kind] || String(kind).toUpperCase()
-  }
+  // Dirt never raises the indicator, so it never wears the urgent colour.
+  readonly property color quietTone: Qt.darker(view.foreground, 1.3)
 
   // The number on the badge. Whether it counts as dirt is the daemon's call,
   // which arrives as r.dirty.
@@ -82,7 +76,6 @@ Column {
   // and the bar can never disagree.
   function matches(r, key) {
     if (key === "all") return true
-    if (key === "unpushed") return (r.unpushed || 0) > 0
     if (key === "dirty") return r.dirty === true
     if (key === "interrupted") return view.isInterrupted(r)
     return r.atRisk === true
@@ -153,6 +146,33 @@ Column {
     view.expanded = e
   }
 
+  // A header is keyed by its group, a checkout by its path.
+  function rowKey(e) {
+    return e.kind === "header" ? "group:" + e.group.key : e.repo.path
+  }
+
+  function toggleBadges(key) {
+    var o = ({})
+    for (var k in view.badgesOpen) o[k] = view.badgesOpen[k]
+    o[key] = !o[key]
+    view.badgesOpen = o
+  }
+
+  function rowBadges(e) {
+    if (e.kind === "header") return view.groupBadges(e.group)
+    if (e.repo.prunable) return [{ text: "STALE", tone: Qt.darker(view.foreground, 1.4) }]
+    return view.repoBadges(e.repo)
+  }
+
+  function overflows(e) {
+    return view.rowBadges(e).length > view.badgeCap
+  }
+
+  // The trailing slot: a header's chevron or a remote-less checkout's mark.
+  function hasTrailing(e) {
+    return e.kind === "header" || view.canMark(e)
+  }
+
   // The rows the list draws, one entry each: a plain repository, a group
   // header, or a checkout under an open header.
   readonly property var rows: {
@@ -172,25 +192,28 @@ Column {
     return out
   }
 
-  // Badges say what is wrong, loudest first. A clean repo says so plainly.
+  // Badges say what is wrong. The checkout's own state leads, the operation
+  // and the count that put it on the local tier, so a capped row never
+  // loses the reason it is listed; then what GitHub adds; then housekeeping.
+  // A clean repo says so plainly.
   function repoBadges(r) {
     var out = []
+    if (view.isInterrupted(r))
+      out.push({ text: String(r.operation).toUpperCase(), tone: Color.urgent, loud: true })
+    if ((r.unpushed || 0) > 0)
+      out.push({ text: r.unpushed + " UNPUSHED", tone: Color.accent, loud: (r.unpushed || 0) > 20 })
     var drift = view.factsByPath[r.path] || []
     for (var i = 0; i < drift.length; i++) {
       // Detached work is a notice so the bar stays on the local tier, but it
       // is the one local state where commits can vanish, so the badge shouts.
       var loud = drift[i].severity === "urgent" || drift[i].kind === "detached-work"
-      out.push({ text: view.factLabel(drift[i].kind),
+      out.push({ text: view.owner.factLabel(drift[i].kind),
                  tone: loud ? Color.urgent : Color.accent,
                  loud: loud })
     }
-    if (view.isInterrupted(r))
-      out.push({ text: String(r.operation).toUpperCase(), tone: Color.urgent, loud: true })
-    if ((r.unpushed || 0) > 0)
-      out.push({ text: r.unpushed + " UNPUSHED", tone: Color.accent, loud: (r.unpushed || 0) > 20 })
     var d = view.dirtyCount(r)
-    if (d > 0) out.push({ text: d + " CHANGED", tone: Qt.lighter(Color.urgent, 1.3) })
-    if ((r.behind || 0) > 0) out.push({ text: r.behind + " BEHIND", tone: Qt.darker(view.foreground, 1.3) })
+    if (d > 0) out.push({ text: d + " CHANGED", tone: view.quietTone })
+    if ((r.behind || 0) > 0) out.push({ text: r.behind + " BEHIND", tone: view.quietTone })
     if ((r.stashes || 0) > 0) out.push({ text: r.stashes + " STASH", tone: Qt.darker(view.foreground, 1.4) })
     if (view.isLocalOnly(r)) out.push({ text: "LOCAL ONLY", tone: Qt.darker(view.foreground, 1.4) })
     if (out.length === 0) out.push({ text: "CLEAN", tone: view.owner.toneOk })
@@ -207,7 +230,7 @@ Column {
       out.push({ text: String(g.operation).toUpperCase(), tone: Color.urgent, loud: true })
     if (g.unpushed > 0)
       out.push({ text: g.unpushed + " UNPUSHED", tone: Color.accent, loud: g.unpushed > 20 })
-    if (g.changed > 0) out.push({ text: g.changed + " CHANGED", tone: Qt.lighter(Color.urgent, 1.3) })
+    if (g.changed > 0) out.push({ text: g.changed + " CHANGED", tone: view.quietTone })
     if (g.stale > 0) out.push({ text: g.stale + " STALE", tone: Qt.darker(view.foreground, 1.4) })
     if (out.length === 0) out.push({ text: "CLEAN", tone: view.owner.toneOk })
     if (g.followed) out.push({ text: "FOLLOWED", tone: Qt.darker(view.foreground, 1.4) })
@@ -224,7 +247,7 @@ Column {
   function rowTone(r) {
     if (view.isInterrupted(r)) return Color.urgent
     if ((r.unpushed || 0) > 0) return Color.accent
-    if (r.dirty === true) return Qt.lighter(Color.urgent, 1.3)
+    if (r.dirty === true) return view.quietTone
     return view.owner.toneOk
   }
 
@@ -251,7 +274,6 @@ Column {
   // checkouts as rows right after the header, so everything below shifts.
   readonly property var filters: [
     { key: "risk", label: "At risk", urgent: false },
-    { key: "unpushed", label: "Unpushed", urgent: false },
     { key: "dirty", label: "Dirty", urgent: false },
     { key: "interrupted", label: "Stuck", urgent: true },
     { key: "all", label: "All", urgent: false }
@@ -260,11 +282,13 @@ Column {
   readonly property int rowCount: 1 + view.rows.length
   readonly property bool formFocused: false
 
+  // Actions on a row: the row itself, then the trailing action when there is
+  // one, then the badge fold when the row overflows.
   function actionCount(row) {
     if (row === 0) return view.filters.length
     var e = view.rows[row - 1]
     if (!e) return 1
-    return e.kind === "header" || view.canMark(e) ? 2 : 1
+    return 1 + (view.hasTrailing(e) ? 1 : 0) + (view.overflows(e) ? 1 : 0)
   }
 
   function activateRow(row, action) {
@@ -274,6 +298,11 @@ Column {
     }
     var e = view.rows[row - 1]
     if (!e) return
+    var trailing = view.hasTrailing(e)
+    if (action === (trailing ? 2 : 1) && view.overflows(e)) {
+      view.toggleBadges(view.rowKey(e))
+      return
+    }
     if (e.kind === "header" && action === 1) {
       view.toggle(e.group.key)
       return
@@ -350,8 +379,10 @@ Column {
           if (repo.last && repo.last.subject) bits.push(repo.last.subject)
           return bits.join(" • ")
         }
-        badges: header ? view.groupBadges(group)
-                       : (stale ? [{ text: "STALE", tone: quiet }] : view.repoBadges(repo))
+        badges: view.rowBadges(entry)
+        maxBadges: view.badgeCap
+        badgesExpanded: view.badgesOpen[view.rowKey(entry)] === true
+        onOverflowTriggered: view.toggleBadges(view.rowKey(entry))
         readonly property bool markable: view.canMark(entry)
         readonly property bool marked: markable && view.isLocalOnly(repo)
         actionIcon: {

@@ -112,16 +112,7 @@ Column {
 
   // One badge naming the kind of drift, so the row reads without the sentence.
   function factBadge(f) {
-    var label = {
-      "missing-work": "MISSING WORK",
-      "ci-red-on-head": "CI RED HERE",
-      "changes-requested": "CHANGES",
-      "stale-branch": "MERGED",
-      "fork-behind": "BEHIND",
-      "detached-work": "DETACHED WORK",
-      "no-remote": "NO REMOTE",
-      "pr-base-moved": "BASE MOVED"
-    }[f.kind] || String(f.kind).toUpperCase()
+    var label = view.owner.factLabel(f.kind)
     // Detached work is a notice so the bar stays on the local tier, but the
     // badge shouts, as it does in the repositories view.
     var loud = f.severity === "urgent" || f.kind === "detached-work"
@@ -176,7 +167,12 @@ Column {
   // the order the sections draw them; then the button at the foot. Each entry
   // carries one action, which is to open it on GitHub.
   readonly property var filters: [
-    { key: "all", label: "Everything", count: view.reviews.length + view.incoming.length + view.brokenPrs.length + view.inbox.length, urgent: false },
+    // Everything counts every section "all" draws, facts and opened issues
+    // included, so the chip and the list agree.
+    { key: "all", label: "Everything",
+      count: view.reviews.length + view.incoming.length + view.brokenPrs.length
+             + view.facts.length + view.inbox.length + view.opened.length,
+      urgent: false },
     { key: "reviews", label: "Reviews", count: view.reviews.length, urgent: view.reviews.length > 0 },
     { key: "broken", label: "Needs fixing", count: view.brokenPrs.length, urgent: view.brokenPrs.length > 0 },
     { key: "inbox", label: "Inbox", count: view.inbox.length, urgent: false },
@@ -296,6 +292,8 @@ Column {
         title: view.shortRepo(modelData.repo) + " #" + modelData.number + "  " + modelData.title
         subtitle: "by " + modelData.author + " • " + view.ago(modelData.updatedAt)
         badges: [{ text: "ON YOURS", tone: Color.urgent, loud: true }].concat(view.labelBadges(modelData))
+        // Labels are compact and already capped by labelBadges.
+        maxBadges: 1 + view.maxLabels + 1
         onActivated: view.owner.openUrl(modelData.url)
       }
     }
@@ -396,6 +394,7 @@ Column {
         title: "#" + modelData.number + "  " + modelData.title
         subtitle: modelData.repo + " • " + view.ago(modelData.updatedAt)
         badges: view.labelBadges(modelData)
+        maxBadges: view.maxLabels + 1
         onActivated: view.owner.openUrl(modelData.url)
       }
     }
