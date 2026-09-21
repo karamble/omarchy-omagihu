@@ -413,7 +413,13 @@ type Issue struct {
 
 // Workload is everything the account currently owes or is owed.
 type Workload struct {
-	Login          string        `json:"login"`
+	Login string `json:"login"`
+	// Organizations are the logins of the organisations the account belongs
+	// to, as far as the token can see. OrgsHidden is set when the token's
+	// scopes say the list is incomplete, so an absent organisation is not
+	// mistaken for not being a member.
+	Organizations  []string      `json:"organizations"`
+	OrgsHidden     bool          `json:"orgsHidden,omitempty"`
 	AuthoredPRs    []PullRequest `json:"authoredPrs"`
 	ReviewRequests []PullRequest `json:"reviewRequests"`
 	// AssignedIssues are the issues waiting on you: assigned to you, or
@@ -443,6 +449,7 @@ func (w Workload) Resolved(list string) bool {
 const workloadQuery = `
 query {
   viewer { login }
+  orgs: viewer { organizations(first: 100) { nodes { login } } }
   authored: search(query: "is:open is:pr author:@me archived:false", type: ISSUE, first: 50) {
     nodes { ...prFields }
   }
@@ -567,7 +574,11 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 		return Workload{}, rate, classifyGraphQL("workload", out.Errors, resp.Header)
 	}
 
-	work := Workload{Login: data.Viewer.Login, Unresolved: unresolved}
+	work := Workload{Login: data.Viewer.Login, Unresolved: unresolved, Organizations: []string{}}
+	for _, o := range data.Orgs.Organizations.Nodes {
+		work.Organizations = append(work.Organizations, o.Login)
+	}
+	work.OrgsHidden = orgsHidden(resp.Header)
 	for _, e := range out.Errors {
 		work.Warnings = append(work.Warnings, e.Message)
 	}
@@ -631,6 +642,13 @@ type gqlWorkload struct {
 	Viewer struct {
 		Login string `json:"login"`
 	} `json:"viewer"`
+	Orgs struct {
+		Organizations struct {
+			Nodes []struct {
+				Login string `json:"login"`
+			} `json:"nodes"`
+		} `json:"organizations"`
+	} `json:"orgs"`
 	Authored       struct{ Nodes []gqlPR }    `json:"authored"`
 	Reviewing      struct{ Nodes []gqlPR }    `json:"reviewing"`
 	Incoming       struct{ Nodes []gqlPR }    `json:"incoming"`
@@ -649,6 +667,24 @@ type gqlError struct {
 	Path    []any  `json:"path"`
 }
 
+// orgsHidden reports whether the token cannot see private organisation
+// memberships. A classic token announces its scopes in X-OAuth-Scopes and
+// needs read:org (or admin:org, which contains it) for the full list; a
+// token that sends no scopes cannot be judged and is trusted.
+func orgsHidden(h http.Header) bool {
+	scopes := h.Get("X-OAuth-Scopes")
+	if scopes == "" {
+		return false
+	}
+	for _, s := range strings.Split(scopes, ",") {
+		switch strings.TrimSpace(s) {
+		case "read:org", "admin:org", "write:org":
+			return false
+		}
+	}
+	return true
+}
+
 // hasData reports whether a GraphQL data field holds anything to decode.
 func hasData(raw json.RawMessage) bool {
 	return len(raw) > 0 && string(raw) != "null"
@@ -659,6 +695,7 @@ func hasData(raw json.RawMessage) bool {
 // assigned and incomingIssues both feed assignedIssues.
 var workloadLists = map[string]string{
 	"viewer":         "login",
+	"orgs":           "organizations",
 	"authored":       "authoredPrs",
 	"reviewing":      "reviewRequests",
 	"incoming":       "reviewRequests",

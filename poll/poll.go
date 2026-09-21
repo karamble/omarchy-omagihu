@@ -39,8 +39,12 @@ type Client interface {
 
 // AccountView is the latest known state for one identity.
 type AccountView struct {
-	AccountID      string               `json:"accountId"`
-	Login          string               `json:"login"`
+	AccountID string `json:"accountId"`
+	Login     string `json:"login"`
+	// Organizations the account belongs to, kept from the last answer that
+	// delivered them, so a cycle that loses the list does not read as
+	// leaving every organisation.
+	Organizations  []string             `json:"organizations,omitempty"`
 	Notifications  []forge.Notification `json:"notifications"`
 	AuthoredPRs    []forge.PullRequest  `json:"authoredPrs"`
 	ReviewRequests []forge.PullRequest  `json:"reviewRequests"`
@@ -380,6 +384,9 @@ func (p *Poller) workLoop(ctx context.Context, c Client) {
 				v.WorkPartial = strings.Join(work.Warnings, "; ")
 				if work.Resolved("login") {
 					v.Login = work.Login
+				}
+				if work.Resolved("organizations") {
+					v.Organizations = work.Organizations
 				}
 				if work.Resolved("authoredPrs") {
 					v.AuthoredPRs = work.AuthoredPRs

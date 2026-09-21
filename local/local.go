@@ -81,6 +81,12 @@ type Repo struct {
 	Main     bool   `json:"main,omitempty"`
 	Prunable string `json:"prunable,omitempty"`
 
+	// Followed marks a repository somebody else owns: its origin names
+	// another account. The collector never sets it, since it knows nothing
+	// of accounts; the API does, from the logins it holds, for the whole
+	// group at once. Followed changes ordering and a badge, never a count.
+	Followed bool `json:"followed,omitempty"`
+
 	Ahead  int `json:"ahead"`
 	Behind int `json:"behind"`
 

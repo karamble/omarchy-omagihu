@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1100,4 +1101,51 @@ func TestRateBucketsAreKeptApart(t *testing.T) {
 			t.Fatalf("rates = inbox %d work %d, want 4999 and 4000", v.InboxRate.Remaining, v.WorkRate.Remaining)
 		}
 	})
+}
+
+// TestRunKeepsOrganizationsWhenUnresolved pins that a cycle which loses the
+// organisation list keeps the last one delivered: an account does not read as
+// having left every organisation, and nothing owned flips to followed.
+func TestRunKeepsOrganizationsWhenUnresolved(t *testing.T) {
+	fake := newFake("a")
+	fake.setWork(forge.Workload{Login: "a", Organizations: []string{"decred"}})
+	p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go p.Run(ctx)
+
+	wait := func(ready func(AccountView) bool) AccountView {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			v := p.Snapshot().Accounts[0]
+			if ready(v) {
+				return v
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("view never reached the expected state: %+v", v)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	wait(func(v AccountView) bool { return len(v.Organizations) == 1 })
+
+	fake.setWork(forge.Workload{Login: "a", Organizations: []string{},
+		Warnings: []string{"nope"}, Unresolved: []string{"organizations"}})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.Wake()
+		if _, work := fake.calls(); work >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the work loop did not poll again")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	v := wait(func(v AccountView) bool { return v.WorkPartial != "" })
+	if !slices.Equal(v.Organizations, []string{"decred"}) {
+		t.Errorf("Organizations = %v after an unresolved answer, want the previous list kept", v.Organizations)
+	}
 }

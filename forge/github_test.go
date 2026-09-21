@@ -666,7 +666,7 @@ func TestWorkKeepsPartialData(t *testing.T) {
 	}
 	// reviewing was nulled, so reviewRequests is unresolved. The lists the
 	// fixture leaves out entirely count too, since nothing came back for them.
-	want := []string{"assignedIssues", "authoredIssues", "mergedPrs", "reviewRequests"}
+	want := []string{"assignedIssues", "authoredIssues", "mergedPrs", "organizations", "reviewRequests"}
 	if !slices.Equal(work.Unresolved, want) {
 		t.Errorf("Unresolved = %v, want %v", work.Unresolved, want)
 	}
@@ -685,7 +685,7 @@ func TestWorkDiscardsUnattributableErrors(t *testing.T) {
 			"viewer":{"login":"tester"},
 			"authored":{"nodes":[]},"reviewing":{"nodes":[]},"incoming":{"nodes":[]},
 			"merged":{"nodes":[]},"assigned":{"nodes":[]},"authoredIssues":{"nodes":[]},
-			"incomingIssues":{"nodes":[]}
+			"incomingIssues":{"nodes":[]},"orgs":{"organizations":{"nodes":[]}}
 		},"errors":[{"message":"something went wrong while executing your query"}]}`))
 	}))
 	defer srv.Close()
@@ -838,7 +838,7 @@ func TestWorkIncomingIssuesFailureLeavesAssignedUnresolved(t *testing.T) {
 				"number":31,"title":"triaged to you","url":"https://github.com/o/r/issues/31",
 				"author":{"login":"colleague"},"repository":{"nameWithOwner":"o/r"}
 			}]},
-			"authoredIssues":{"nodes":[]},
+			"authoredIssues":{"nodes":[]},"orgs":{"organizations":{"nodes":[]}},
 			"incomingIssues":null
 		},"errors":[{"type":"FORBIDDEN","message":"Resource not accessible","path":["incomingIssues"]}]}`))
 	}))
@@ -853,5 +853,68 @@ func TestWorkIncomingIssuesFailureLeavesAssignedUnresolved(t *testing.T) {
 	}
 	if len(work.Warnings) != 1 {
 		t.Errorf("Warnings = %v, want the one error", work.Warnings)
+	}
+}
+
+// TestWorkDecodesOrganizations pins the organisation list: it arrives under
+// its own alias so a failure on it is its own unresolved list, and a token
+// whose scopes hide private memberships says so rather than reading as a
+// member of nothing.
+func TestWorkDecodesOrganizations(t *testing.T) {
+	body := `{"data":{
+		"viewer":{"login":"tester"},
+		"orgs":{"organizations":{"nodes":[{"login":"Decred"},{"login":"other-org"}]}},
+		"authored":{"nodes":[]},"reviewing":{"nodes":[]},"incoming":{"nodes":[]},"merged":{"nodes":[]},
+		"assigned":{"nodes":[]},"authoredIssues":{"nodes":[]},"incomingIssues":{"nodes":[]}
+	}}`
+	for _, tc := range []struct {
+		name   string
+		scopes string
+		hidden bool
+	}{
+		{"read:org sees everything", "repo, read:org", false},
+		{"admin:org contains read:org", "admin:org", false},
+		{"no org scope hides private memberships", "repo, read:user", true},
+		{"a fine-grained token sends no scopes and is trusted", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.scopes != "" {
+					w.Header().Set("X-OAuth-Scopes", tc.scopes)
+				}
+				w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			work, _, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+			if err != nil {
+				t.Fatalf("Work: %v", err)
+			}
+			if !slices.Equal(work.Organizations, []string{"Decred", "other-org"}) {
+				t.Errorf("Organizations = %v, want both logins as GitHub spelled them", work.Organizations)
+			}
+			if work.OrgsHidden != tc.hidden {
+				t.Errorf("OrgsHidden = %v, want %v", work.OrgsHidden, tc.hidden)
+			}
+			if len(work.Unresolved) != 0 {
+				t.Errorf("Unresolved = %v, want nothing", work.Unresolved)
+			}
+		})
+	}
+
+	// Losing the organisation list is its own unresolved entry, not a blank.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":{
+			"viewer":{"login":"tester"},"orgs":null,
+			"authored":{"nodes":[]},"reviewing":{"nodes":[]},"incoming":{"nodes":[]},"merged":{"nodes":[]},
+			"assigned":{"nodes":[]},"authoredIssues":{"nodes":[]},"incomingIssues":{"nodes":[]}
+		},"errors":[{"type":"FORBIDDEN","message":"nope","path":["orgs"]}]}`))
+	}))
+	defer srv.Close()
+	work, _, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+	if err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if !slices.Equal(work.Unresolved, []string{"organizations"}) || work.Resolved("login") != true {
+		t.Errorf("Unresolved = %v, want organizations alone with the login still resolved", work.Unresolved)
 	}
 }

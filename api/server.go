@@ -174,7 +174,7 @@ func (s *Server) Handler() http.Handler {
 	// switch takes effect immediately instead of at the next daemon restart.
 	mcpHandler := mcpserver.Handler(mcpserver.Source{
 		Remote:     s.poller,
-		Local:      s.watcher,
+		Local:      localView{s},
 		Monitoring: s.store.MonitoringEnabled,
 		Facts:      s.Facts,
 		Alerts:     s.alertEngine,
@@ -399,7 +399,7 @@ type dashboardResponse struct {
 // what is at risk, resolved into one bar signal.
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	remote := s.poller.Snapshot()
-	repos := s.watcher.Snapshot()
+	repos := s.annotate(s.watcher.Snapshot(), remote)
 
 	work := s.mergedWork(remote)
 	inbox := s.mergedInbox(remote)
@@ -602,6 +602,87 @@ func (s *Server) facts() []correlate.Fact {
 	return s.correlate(s.poller.Snapshot(), s.watcher.Snapshot())
 }
 
+// localView is the collector's snapshot as the tools see it, annotated the
+// same way the panel's is.
+type localView struct{ s *Server }
+
+func (v localView) Snapshot() *local.Snapshot {
+	return v.s.annotate(v.s.watcher.Snapshot(), v.s.poller.Snapshot())
+}
+
+// annotate marks each repository owned or followed against the account
+// logins and orders followed ones below your own. It lives here rather than
+// in the collector because ownership needs the logins, which the collector
+// has no business knowing. Ownership is a property of the repository, so a
+// group takes one answer from its first checkout with an origin. Risk is
+// untouched: a followed checkout holding unpushed work still sorts and
+// counts with everything else at risk.
+func (s *Server) annotate(repos *local.Snapshot, remote *poll.Snapshot) *local.Snapshot {
+	// Yours means owned by any enabled account or by an organisation one of
+	// them belongs to.
+	logins := make(map[string]bool)
+	for _, a := range remote.Accounts {
+		if a.Login != "" {
+			logins[strings.ToLower(a.Login)] = true
+		}
+		for _, org := range a.Organizations {
+			logins[strings.ToLower(org)] = true
+		}
+	}
+	out := *repos
+	out.Repos = slices.Clone(repos.Repos)
+	// With no login to compare against nothing can be called somebody else's.
+	if len(logins) == 0 {
+		return &out
+	}
+
+	followed := make(map[string]bool)
+	for _, r := range out.Repos {
+		origin, ok := r.Remotes["origin"]
+		if !ok {
+			continue
+		}
+		if _, decided := followed[r.GroupKey()]; !decided {
+			followed[r.GroupKey()] = !ownedBy(logins, origin)
+		}
+	}
+	risk := make(map[string]bool)
+	for i := range out.Repos {
+		key := out.Repos[i].GroupKey()
+		out.Repos[i].Followed = followed[key]
+		risk[key] = risk[key] || out.Repos[i].AtRisk()
+	}
+	// Stable, so within each tier the collector's order stands: groups stay
+	// together, main checkout first, names in order.
+	slices.SortStableFunc(out.Repos, func(a, b local.Repo) int {
+		ka, kb := a.GroupKey(), b.GroupKey()
+		if risk[ka] != risk[kb] {
+			if risk[ka] {
+				return -1
+			}
+			return 1
+		}
+		if followed[ka] != followed[kb] {
+			if followed[ka] {
+				return 1
+			}
+			return -1
+		}
+		return 0
+	})
+	return &out
+}
+
+// ownedBy reports whether the origin's owner is one of the logins. A remote
+// with no recognisable owner gives no reason to think it is somebody else's.
+func ownedBy(logins map[string]bool, origin string) bool {
+	owner, _, found := strings.Cut(correlate.NormalizeRemote(origin), "/")
+	if !found {
+		return true
+	}
+	return logins[strings.ToLower(owner)]
+}
+
 // correlate is the one place facts are built, so the dashboard, the alert
 // sample, the notifier and the MCP surface all apply the same marks.
 func (s *Server) correlate(remote *poll.Snapshot, repos *local.Snapshot) []correlate.Fact {
@@ -619,7 +700,7 @@ func (s *Server) SetEngine(e *alerts.Engine) { s.engine = e }
 // of its own.
 func (s *Server) AlertSample() alerts.Snapshot {
 	remote := s.poller.Snapshot()
-	repos := s.watcher.Snapshot()
+	repos := s.annotate(s.watcher.Snapshot(), remote)
 	work := s.mergedWork(remote)
 	health := s.health(remote, repos)
 	inbox := s.mergedInbox(remote)
@@ -915,7 +996,7 @@ func (s *Server) handleRecycleToken(w http.ResponseWriter, r *http.Request) {
 // repository with those at risk first. risk=1 keeps only the checkouts with
 // unpushed commits or an interrupted operation.
 func (s *Server) handleRepos(w http.ResponseWriter, r *http.Request) {
-	snap := s.watcher.Snapshot()
+	snap := s.annotate(s.watcher.Snapshot(), s.poller.Snapshot())
 	if r.URL.Query().Get("risk") == "1" {
 		filtered := &local.Snapshot{TakenAt: snap.TakenAt, Roots: snap.Roots}
 		for _, repo := range snap.Repos {

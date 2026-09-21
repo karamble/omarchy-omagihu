@@ -189,6 +189,15 @@ func Demo() any {
 			Group: "~/go/src/pilotlight/.git", Main: true,
 			ObservedAt: ago(20 * time.Second),
 		},
+		// Somebody else's repository, cloned to read. Trailing it is its
+		// normal state, so it sorts last and says what it is.
+		{
+			Name: "driftnet", Path: "~/src/driftnet", Branch: "main",
+			Upstream: "origin/main", Behind: 243,
+			Remotes: map[string]string{"origin": "https://github.com/driftwood/driftnet"},
+			Group:   "~/src/driftnet/.git", Main: true, Followed: true,
+			ObservedAt: ago(20 * time.Second),
+		},
 	}
 
 	att := attention.Resolve(attention.Input{

@@ -101,7 +101,7 @@ Column {
       var g = byKey[key]
       if (!g) {
         g = { key: key, name: r.name, remotes: r.remotes, members: [],
-              checkouts: 0, risky: 0, stale: 0,
+              checkouts: 0, risky: 0, stale: 0, followed: r.followed === true,
               unpushed: 0, changed: 0, operation: "", dirty: false, atRisk: false }
         byKey[key] = g
         out.push(g)
@@ -194,6 +194,9 @@ Column {
     if ((r.stashes || 0) > 0) out.push({ text: r.stashes + " STASH", tone: Qt.darker(view.foreground, 1.4) })
     if (view.isLocalOnly(r)) out.push({ text: "LOCAL ONLY", tone: Qt.darker(view.foreground, 1.4) })
     if (out.length === 0) out.push({ text: "CLEAN", tone: view.owner.toneOk })
+    // Somebody else's repository. Quiet, and after the state: what is wrong
+    // with it matters more than whose it is.
+    if (r.followed === true) out.push({ text: "FOLLOWED", tone: Qt.darker(view.foreground, 1.4) })
     return out
   }
 
@@ -207,6 +210,7 @@ Column {
     if (g.changed > 0) out.push({ text: g.changed + " CHANGED", tone: Qt.lighter(Color.urgent, 1.3) })
     if (g.stale > 0) out.push({ text: g.stale + " STALE", tone: Qt.darker(view.foreground, 1.4) })
     if (out.length === 0) out.push({ text: "CLEAN", tone: view.owner.toneOk })
+    if (g.followed) out.push({ text: "FOLLOWED", tone: Qt.darker(view.foreground, 1.4) })
     return out
   }
 

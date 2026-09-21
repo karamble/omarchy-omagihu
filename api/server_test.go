@@ -299,3 +299,94 @@ func anyStrings(v any) []string {
 	}
 	return out
 }
+
+// TestAnnotateMarksFollowedRepositories pins ownership as the API derives
+// it: a repository whose origin names another account is followed, one whose
+// origin is you is yours (a fork included, whatever its upstream), one with no
+// origin is yours, a group answers as one, followed sorts below your own, and
+// followed never means less at risk.
+func TestAnnotateMarksFollowedRepositories(t *testing.T) {
+	remote := &poll.Snapshot{Accounts: []poll.AccountView{{AccountID: "a", Login: "You"}}}
+	s := NewServer(&accounts.Store{}, fixedPoller{remote}, fixedWatcher{&local.Snapshot{}},
+		slog.New(slog.DiscardHandler), "test")
+
+	// In the collector's order: at-risk groups first, then names.
+	repos := &local.Snapshot{Repos: []local.Repo{
+		{Path: "/lib", Name: "lib", Group: "/lib/.git", Main: true, Unpushed: 1,
+			Remotes: map[string]string{"origin": "https://github.com/other/lib"}},
+		{Path: "/thing", Name: "thing", Group: "/thing/.git", Main: true, Unpushed: 2,
+			Remotes: map[string]string{"origin": "git@github.com:you/thing.git"}},
+		{Path: "/fork", Name: "fork", Group: "/fork/.git", Main: true,
+			Remotes: map[string]string{"origin": "git@github.com:you/fork.git", "upstream": "https://github.com/other/fork"}},
+		{Path: "/scratch", Name: "scratch", Group: "/scratch/.git", Main: true},
+		{Path: "/tool", Name: "tool", Group: "/tool/.git", Main: true, Behind: 243,
+			Remotes: map[string]string{"origin": "https://github.com/someone/tool"}},
+		{Path: "/tool-wt", Name: "tool-wt", Group: "/tool/.git",
+			Remotes: map[string]string{"origin": "https://github.com/someone/tool"}},
+		{Path: "/tool-gone", Name: "tool-gone", Group: "/tool/.git", Prunable: "gitdir file points to non-existent location"},
+	}}
+
+	got := s.annotate(repos, remote)
+	var order []string
+	followed := make(map[string]bool)
+	for _, r := range got.Repos {
+		order = append(order, r.Name)
+		followed[r.Name] = r.Followed
+	}
+	want := "thing lib fork scratch tool tool-wt tool-gone"
+	if strings.Join(order, " ") != want {
+		t.Errorf("order = %v, want %s: yours first within each tier, at-risk followed above clean yours", order, want)
+	}
+	for name, f := range map[string]bool{"lib": true, "thing": false, "fork": false, "scratch": false,
+		"tool": true, "tool-wt": true, "tool-gone": true} {
+		if followed[name] != f {
+			t.Errorf("%s followed = %v, want %v", name, followed[name], f)
+		}
+	}
+	if got := local.RepositoriesAtRisk(got.Repos); got != 2 {
+		t.Errorf("RepositoriesAtRisk = %d, want 2: the followed clone with unpushed work still counts", got)
+	}
+	if repos.Repos[0].Followed {
+		t.Error("annotate wrote into the collector's snapshot instead of a copy")
+	}
+
+	// With no login known, nothing can be called somebody else's.
+	for _, r := range s.annotate(repos, &poll.Snapshot{}).Repos {
+		if r.Followed {
+			t.Errorf("%s followed with no account login to compare against", r.Name)
+		}
+	}
+}
+
+// TestAnnotateCountsOrganisationsAsYours pins the organisation rule: an origin
+// under an organisation an enabled account belongs to is owned, under one it
+// does not belong to is followed, and the comparison ignores case.
+func TestAnnotateCountsOrganisationsAsYours(t *testing.T) {
+	remote := &poll.Snapshot{Accounts: []poll.AccountView{
+		{AccountID: "a", Login: "you", Organizations: []string{"Decred"}},
+	}}
+	s := NewServer(&accounts.Store{}, fixedPoller{remote}, fixedWatcher{&local.Snapshot{}},
+		slog.New(slog.DiscardHandler), "test")
+	repos := &local.Snapshot{Repos: []local.Repo{
+		{Path: "/dcrd", Name: "dcrd", Group: "/dcrd/.git", Main: true,
+			Remotes: map[string]string{"origin": "git@github.com:decred/dcrd.git"}},
+		{Path: "/lib", Name: "lib", Group: "/lib/.git", Main: true,
+			Remotes: map[string]string{"origin": "https://github.com/other-org/lib"}},
+	}}
+	got := s.annotate(repos, remote)
+	for _, r := range got.Repos {
+		switch r.Name {
+		case "dcrd":
+			if r.Followed {
+				t.Error("dcrd followed, want owned through the organisation")
+			}
+		case "lib":
+			if !r.Followed {
+				t.Error("lib owned, want followed: not one of your organisations")
+			}
+		}
+	}
+	if got.Repos[0].Name != "dcrd" {
+		t.Errorf("order = %s first, want the organisation's repository above the followed one", got.Repos[0].Name)
+	}
+}
