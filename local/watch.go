@@ -2,7 +2,9 @@ package local
 
 import (
 	"context"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -165,6 +167,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
+			w.adoptRefDir(fsw, event)
 			for _, repo := range w.reposFor(event.Name) {
 				pending[repo] = struct{}{}
 				debounceC = time.After(debounce)
@@ -268,14 +271,62 @@ func (w *Watcher) watch(fsw *fsnotify.Watcher, repoPath string) {
 		common = realPath(dir)
 	}
 	dirs := gitDirs{own: realPath(dir), common: common}
-	for _, p := range []string{dirs.own, filepath.Join(dirs.common, "refs", "heads")} {
-		if err := fsw.Add(p); err != nil {
-			w.logger.Debug("cannot watch path", "path", p, "err", err)
-		}
+	if err := fsw.Add(dirs.own); err != nil {
+		w.logger.Debug("cannot watch path", "path", dirs.own, "err", err)
 	}
+	w.watchRefs(fsw, filepath.Join(dirs.common, "refs", "heads"))
 	w.mu.Lock()
 	w.watched[repoPath] = dirs
 	w.mu.Unlock()
+}
+
+// watchRefs watches a refs directory and every directory below it. A branch
+// with a slash in its name lives in a subdirectory, and a watch is not
+// recursive, so each level is added on its own. Across the checkouts on
+// this machine that is a handful of watches beyond the roots.
+func (w *Watcher) watchRefs(fsw *fsnotify.Watcher, root string) {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		if err := fsw.Add(path); err != nil {
+			w.logger.Debug("cannot watch path", "path", path, "err", err)
+		}
+		return nil
+	})
+	if err != nil {
+		w.logger.Debug("cannot walk refs", "path", root, "err", err)
+	}
+}
+
+// unwatchRefs drops a refs directory and everything watched below it.
+func unwatchRefs(fsw *fsnotify.Watcher, root string) {
+	for _, p := range fsw.WatchList() {
+		if p == root || under(p, root) {
+			_ = fsw.Remove(p)
+		}
+	}
+}
+
+// adoptRefDir starts watching a directory that just appeared under a watched
+// refs tree: the first branch named under a new prefix creates it, and
+// without this its moves would be as invisible as they were before.
+func (w *Watcher) adoptRefDir(fsw *fsnotify.Watcher, event fsnotify.Event) {
+	if !event.Has(fsnotify.Create) {
+		return
+	}
+	info, err := os.Stat(event.Name)
+	if err != nil || !info.IsDir() {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, dirs := range w.watched {
+		if under(event.Name, filepath.Join(dirs.common, "refs", "heads")) {
+			w.watchRefs(fsw, event.Name)
+			return
+		}
+	}
 }
 
 // unwatch drops a checkout's watches, keeping the common heads while another
@@ -296,7 +347,7 @@ func (w *Watcher) unwatch(fsw *fsnotify.Watcher, repoPath string) {
 	}
 	_ = fsw.Remove(dirs.own)
 	if !shared {
-		_ = fsw.Remove(filepath.Join(dirs.common, "refs", "heads"))
+		unwatchRefs(fsw, filepath.Join(dirs.common, "refs", "heads"))
 	}
 }
 

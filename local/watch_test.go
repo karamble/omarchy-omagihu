@@ -39,6 +39,7 @@ func attributed(t *testing.T, w *Watcher, fsw *fsnotify.Watcher, act func()) []s
 	for {
 		select {
 		case e := <-fsw.Events:
+			w.adoptRefDir(fsw, e)
 			for _, p := range w.reposFor(e.Name) {
 				if !slices.Contains(hit, p) {
 					hit = append(hit, p)
@@ -177,5 +178,62 @@ func TestRunReinspectsTheWorktreeThatChanged(t *testing.T) {
 	}
 	if observed(f.main).After(mainBefore) {
 		t.Error("the main checkout was re-inspected for a change that belongs to wt-b")
+	}
+}
+
+// TestSlashedBranchMoveIsSeen pins #33: a branch with a slash in its name
+// lives in a subdirectory of the refs tree, and a move of it, with nothing
+// else touched, still names the checkout on it. Both the directories that
+// exist when the watch starts and one created afterwards are covered, and
+// the transient packed-refs.lock beside the move still wakes nobody.
+func TestSlashedBranchMoveIsSeen(t *testing.T) {
+	f := newWorktreeFixture(t)
+	git(t, f.wtA, "checkout", "--quiet", "-b", "feat/wt")
+	git(t, f.main, "branch", "feat/idle", "HEAD")
+	paths := Discover(t.Context(), Config{Roots: []string{f.root}, MaxDepth: 2})
+	w, fsw := watchedFixture(t, f.root, paths)
+
+	// A prefix that existed when the watch started: the move of the branch a
+	// worktree sits on names that worktree alone.
+	got := attributed(t, w, fsw, func() {
+		git(t, f.main, "update-ref", "refs/heads/feat/wt", "HEAD")
+	})
+	if !slices.Equal(got, []string{f.wtA}) {
+		t.Errorf("a ref-only move of feat/wt was attributed to %v, want wt-a alone", got)
+	}
+	// A branch nobody is on names the whole repository, as an unslashed one does.
+	got = attributed(t, w, fsw, func() {
+		git(t, f.main, "branch", "-f", "feat/idle", "feature-b")
+	})
+	if len(got) != 3 {
+		t.Errorf("a ref-only move of feat/idle was attributed to %v, want every checkout", got)
+	}
+
+	// A prefix created after the watch started is adopted when it appears.
+	got = attributed(t, w, fsw, func() {
+		git(t, f.main, "branch", "fix/new", "HEAD")
+	})
+	got = attributed(t, w, fsw, func() {
+		git(t, f.main, "branch", "-f", "fix/new", "feature-b")
+	})
+	if len(got) != 3 {
+		t.Errorf("a move under a prefix created after the watch was attributed to %v, want every checkout", got)
+	}
+
+	heads := filepath.Join(f.main, ".git", "refs", "heads")
+	watched := fsw.WatchList()
+	for _, dir := range []string{"feat", "fix"} {
+		if !slices.Contains(watched, filepath.Join(heads, dir)) {
+			t.Errorf("%s is not watched: %v", filepath.Join(heads, dir), watched)
+		}
+	}
+	// Forgetting the last member drops the subdirectory watches with the root.
+	for _, p := range paths {
+		w.unwatch(fsw, p)
+	}
+	for _, p := range fsw.WatchList() {
+		if under(p, heads) || p == heads {
+			t.Errorf("%s still watched after every member was forgotten", p)
+		}
 	}
 }
