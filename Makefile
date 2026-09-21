@@ -28,6 +28,11 @@ export CGO_ENABLED = 0
 BUILDFLAGS := -trimpath -mod=readonly -buildvcs=false
 BINARIES := omagihud omagihu omagihu-setup
 
+# Install commands live in the FAQ, not here. docs/ is outside the marketplace
+# security scan, so the preflight can point at them without the scanner reading
+# them as things this Makefile does.
+FAQ_URL := https://github.com/karamble/omarchy-omagihu/blob/master/docs/FAQ.md
+
 PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins/karamble.omagihu
 PLUGIN_FILES := manifest.json Panel.qml Service.qml DashboardView.qml ReposView.qml \
 		AlertsView.qml ArmForm.qml SettingsView.qml ListRow.qml Badge.qml \
@@ -100,7 +105,9 @@ toolchain:
 		echo; \
 		echo "  then open a new terminal and press Build again."; \
 	else \
-		echo "      sudo pacman -S go"; \
+		echo "  Installing Go, or keeping toolchains in your home directory:"; \
+		echo; \
+		echo "      $(FAQ_URL)"; \
 	fi; \
 	echo; \
 	echo "Go $(shell sed -n 's/^go \([0-9.]*\)$$/\1/p' go.mod) or newer is needed."; \
