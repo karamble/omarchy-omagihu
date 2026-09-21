@@ -295,3 +295,78 @@ func TestInspectHasNoBaseWithoutOriginHead(t *testing.T) {
 			repo.BaseBehind, repo.BaseBranch)
 	}
 }
+
+// newClone makes a repository with a remote, by cloning one, so Unpushed and
+// Stranded are both computed. They are only counted where there is a remote.
+func newClone(t *testing.T) string {
+	t.Helper()
+	origin := newRepo(t)
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "clone")
+	git(t, parent, "clone", "--quiet", origin, dir)
+	return dir
+}
+
+// TestStrandedIgnoresAParkedBranchTip is the measured bug. Unpushed counts
+// commits reachable from HEAD and from no remote, and never consults local
+// branches, so a HEAD parked on the tip of an unpushed branch counts there
+// even though the branch still names the commit and nothing can be lost.
+func TestStrandedIgnoresAParkedBranchTip(t *testing.T) {
+	dir := newClone(t)
+	git(t, dir, "checkout", "--quiet", "-b", "topic")
+	write(t, filepath.Join(dir, "mine.txt"), "mine\n")
+	git(t, dir, "add", "mine.txt")
+	git(t, dir, "commit", "--quiet", "-m", "work on a branch")
+	// What `git checkout <sha>` of your own branch tip gives you.
+	git(t, dir, "checkout", "--quiet", "--detach")
+
+	repo := Inspect(t.Context(), dir)
+	if !repo.Detached {
+		t.Fatalf("Detached = false, want a detached HEAD: %+v", repo)
+	}
+	if repo.Unpushed == 0 {
+		t.Error("Unpushed = 0, want the commit to count as unpushed, which is what over-reported")
+	}
+	if repo.Stranded != 0 {
+		t.Errorf("Stranded = %d, want 0: the topic branch still names this commit", repo.Stranded)
+	}
+}
+
+// TestStrandedCountsWorkNoBranchNames is the genuine case the fact is for:
+// committed on a detached HEAD, so nothing but HEAD points at it and the
+// reflog really is the only way back.
+func TestStrandedCountsWorkNoBranchNames(t *testing.T) {
+	dir := newClone(t)
+	git(t, dir, "checkout", "--quiet", "--detach")
+	write(t, filepath.Join(dir, "loose.txt"), "loose\n")
+	git(t, dir, "add", "loose.txt")
+	git(t, dir, "commit", "--quiet", "-m", "committed on a detached HEAD")
+
+	repo := Inspect(t.Context(), dir)
+	if !repo.Detached {
+		t.Fatalf("Detached = false, want a detached HEAD: %+v", repo)
+	}
+	if repo.Stranded != 1 {
+		t.Errorf("Stranded = %d, want 1: no branch and no remote names this commit", repo.Stranded)
+	}
+}
+
+// TestStrandedNeedsARemote pins the split. Unpushed is not counted in a
+// repository with no remotes, because there is nowhere to push and the count
+// would flag every scratch repository; Stranded is counted in the same place,
+// so such a checkout keeps raising no-remote rather than detached-work.
+func TestStrandedNeedsARemote(t *testing.T) {
+	dir := newRepo(t)
+	git(t, dir, "checkout", "--quiet", "--detach")
+	write(t, filepath.Join(dir, "loose.txt"), "loose\n")
+	git(t, dir, "add", "loose.txt")
+	git(t, dir, "commit", "--quiet", "-m", "committed on a detached HEAD")
+
+	repo := Inspect(t.Context(), dir)
+	if !repo.Detached {
+		t.Fatalf("Detached = false, want a detached HEAD: %+v", repo)
+	}
+	if repo.Stranded != 0 {
+		t.Errorf("Stranded = %d, want 0 where there are no remotes", repo.Stranded)
+	}
+}

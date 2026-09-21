@@ -192,9 +192,18 @@ func localOnlyServer(t *testing.T) (*Server, *accounts.Store) {
 	t.Helper()
 	store := &accounts.Store{APIToken: "tok"}
 	store.SetPath(filepath.Join(t.TempDir(), "accounts.json"))
+	// Two checkouts, so "and nothing else" is a fact on another repository
+	// rather than a second fact on this one. A checkout with no remote has
+	// nothing counted as stranded, so it is the only one that can raise
+	// no-remote and it can never raise detached-work.
 	repos := &local.Snapshot{Repos: []local.Repo{{
-		Name: "scratch", Path: "/s", Branch: "(detached)", Detached: true, Unpushed: 1,
+		Name: "scratch", Path: "/s", Branch: "main",
 		Last: local.Commit{SHA: "abc"},
+	}, {
+		Name: "parked", Path: "/p", Branch: "(detached)", Detached: true,
+		Unpushed: 1, Stranded: 1,
+		Remotes: map[string]string{"origin": "git@github.com:o/r.git"},
+		Last:    local.Commit{SHA: "def"},
 	}}}
 	s := NewServer(store, fixedPoller{&poll.Snapshot{}}, fixedWatcher{repos}, slog.New(slog.DiscardHandler), "test")
 	return s, store

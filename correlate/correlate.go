@@ -228,19 +228,21 @@ func CorrelateWith(remote *poll.Snapshot, lcl *local.Snapshot, opts Options) []F
 			})
 		}
 
-		// Unpushed counts commits reachable from HEAD and from no remote. On a
-		// detached HEAD that is work no branch is known to name. Notice, not
+		// Stranded counts what nothing but HEAD points at. No Detached check is
+		// needed beside it: a HEAD on a branch is reachable from that branch,
+		// so the count is zero, and stranded work is detached by arithmetic
+		// rather than by where the count happens to be taken. Notice, not
 		// urgent: an urgent fact lifts the bar to the reconcile tier, and this
 		// is local work, which stays at the local tier; the badge is loud
 		// instead.
-		if repo.Detached && repo.Unpushed > 0 {
+		if repo.Stranded > 0 {
 			facts = append(facts, Fact{
 				Kind:     KindDetachedWork,
 				Severity: Notice,
 				Repo:     NormalizeRemote(repo.Remotes["origin"]),
 				Path:     repo.Path, Branch: repo.Branch,
 				Summary: fmt.Sprintf("%s: %s on a detached HEAD",
-					repo.Name, plural(repo.Unpushed, "commit", "commits")),
+					repo.Name, plural(repo.Stranded, "commit", "commits")),
 				Detail: "no branch names this work and the next checkout leaves it to the reflog; git switch -c <name> keeps it",
 			})
 		}

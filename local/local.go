@@ -102,6 +102,14 @@ type Repo struct {
 	Unpushed   int  `json:"unpushed"`
 	NoUpstream bool `json:"noUpstream,omitempty"`
 
+	// Stranded is work nothing but HEAD points at: reachable from HEAD, from
+	// no branch and from no remote, which is when the reflog is the only way
+	// back. Unpushed does not consult local branches, so it counts a detached
+	// HEAD parked on the tip of an unpushed branch, where a branch still names
+	// the commit. Counted only for a detached HEAD in a repository that has
+	// remotes, matching where Unpushed is counted at all.
+	Stranded int `json:"stranded,omitempty"`
+
 	// UpstreamBehind is how far a fork trails the repository it was forked
 	// from, counted against the refs last fetched. UpstreamBase names the
 	// branch it was counted against, so a distance is never quoted at a

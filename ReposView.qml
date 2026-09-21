@@ -337,7 +337,15 @@ Column {
     var where = r.path
     if (view.isMulti(g)) where += r.main ? "  (main checkout of " + g.name + ")" : "  (linked worktree of " + g.name + ")"
     repository.push({ label: "path", value: where, tone: body })
-    if (r.detached) repository.push({ label: "HEAD", value: "detached, on no branch", tone: Color.accent })
+    // Detached says where HEAD is, not whether the work can be lost. A HEAD
+    // parked on the tip of a branch is detached and nothing is stranded, so
+    // only the stranded case claims no branch names it. Nothing is counted as
+    // stranded in a repository with no remotes, so the quiet wording there
+    // claims nothing either way.
+    if (r.detached)
+      repository.push({ label: "HEAD",
+        value: (r.stranded || 0) > 0 ? "detached, on no branch" : "detached",
+        tone: Color.accent })
     var remotes = r.remotes || {}
     var names = Object.keys(remotes)
     if (names.length === 0) repository.push({ label: "remote", value: "none", tone: quiet })

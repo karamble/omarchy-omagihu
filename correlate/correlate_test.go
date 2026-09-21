@@ -262,7 +262,7 @@ func find(t *testing.T, facts []Fact, k Kind) Fact {
 
 func TestDetachedWork(t *testing.T) {
 	facts := Correlate(&poll.Snapshot{}, repo(local.Repo{
-		Branch: "(detached)", Detached: true, Unpushed: 1, Path: "/checkout/r",
+		Branch: "(detached)", Detached: true, Unpushed: 1, Stranded: 1, Path: "/checkout/r",
 	}))
 	f := find(t, facts, KindDetachedWork)
 	if f.Urgent() {
@@ -272,13 +272,28 @@ func TestDetachedWork(t *testing.T) {
 		t.Errorf("fact = %+v, want it keyed on the checkout's path and branch", f)
 	}
 
-	// The adjacent cases: a detached HEAD with nothing unpushed, and ordinary
+	// The adjacent cases: a detached HEAD with nothing stranded, and ordinary
 	// unpushed work on a named branch, which is a badge and not a fact.
 	if got := Correlate(&poll.Snapshot{}, repo(local.Repo{Branch: "(detached)", Detached: true})); hasKind(got, KindDetachedWork) {
-		t.Errorf("kinds = %v, want no detached-work when nothing is unpushed", kinds(got))
+		t.Errorf("kinds = %v, want no detached-work when nothing is stranded", kinds(got))
 	}
 	if got := Correlate(&poll.Snapshot{}, repo(local.Repo{Branch: "topic", Unpushed: 3})); hasKind(got, KindDetachedWork) {
 		t.Errorf("kinds = %v, want no detached-work on a named branch", kinds(got))
+	}
+}
+
+// TestDetachedWorkIgnoresAParkedBranchTip is the bug. Unpushed counts commits
+// reachable from HEAD and from no remote, and never consults local branches,
+// so a HEAD parked on the tip of an unpushed branch counts there. A branch
+// still names that commit, nothing can be lost, and the reflog sentence the
+// fact carries is not true of it.
+func TestDetachedWorkIgnoresAParkedBranchTip(t *testing.T) {
+	parked := local.Repo{
+		Branch: "(detached)", Detached: true, Path: "/checkout/r",
+		Unpushed: 1, Stranded: 0,
+	}
+	if got := Correlate(&poll.Snapshot{}, repo(parked)); hasKind(got, KindDetachedWork) {
+		t.Errorf("kinds = %v, want no detached-work for a HEAD parked on a branch tip", kinds(got))
 	}
 }
 

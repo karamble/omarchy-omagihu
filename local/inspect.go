@@ -61,6 +61,16 @@ func Inspect(ctx context.Context, path string) Repo {
 			mustRun(ctx, path, "rev-list", "--count", "HEAD", "--not", "--remotes"))); err == nil {
 			repo.Unpushed = n
 		}
+		// The same question asked honestly for a detached HEAD: branches count
+		// too, so a HEAD parked on the tip of an unpushed branch is not
+		// stranded, because that branch still names the commit. Worth a second
+		// rev-list only while HEAD is actually detached.
+		if repo.Detached {
+			if n, err := strconv.Atoi(strings.TrimSpace(
+				mustRun(ctx, path, "rev-list", "--count", "HEAD", "--not", "--branches", "--remotes"))); err == nil {
+				repo.Stranded = n
+			}
+		}
 	}
 	return repo
 }
