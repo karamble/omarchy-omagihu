@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,6 +94,20 @@ func (f *fakeClient) Work(ctx context.Context) (forge.Workload, forge.Rate, erro
 		return forge.Workload{}, forge.Rate{}, err
 	}
 	return work, forge.Rate{Remaining: 4999, Limit: 5000}, nil
+}
+
+// setWork changes what Work returns from now on.
+func (f *fakeClient) setWork(work forge.Workload) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.work = work
+}
+
+// setErrors changes what both calls return from now on.
+func (f *fakeClient) setErrors(inbox, work error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inboxErr, f.workErr = inbox, work
 }
 
 func (f *fakeClient) calls() (inbox, work int) {
@@ -709,5 +724,203 @@ func TestRapidForceRefreshBounded(t *testing.T) {
 		if lm != "" {
 			t.Fatalf("account B sent conditional LastModified=%q under a force burst", lm)
 		}
+	}
+}
+
+// TestRunSurvivesRecoverableFailures is the regression #5 exists for: only a
+// rejected token may end an account's loop. A 502, a spent budget and a
+// resource the token cannot see all back off and poll again.
+func TestRunSurvivesRecoverableFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"502", &forge.APIError{Op: "notifications", Status: 502, Class: forge.ErrTransient}},
+		{"throttled", &forge.APIError{Op: "notifications", Status: 429, Class: forge.ErrThrottled}},
+		{"blocked", &forge.APIError{Op: "notifications", Status: 404, Class: forge.ErrBlocked}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFake("a")
+			fake.setErrors(tc.err, tc.err)
+			p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				p.Run(ctx)
+			}()
+
+			// Wait for both loops to have failed once.
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				inbox, work := fake.calls()
+				if inbox >= 1 && work >= 1 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("poller never called the fake")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if snap := p.Snapshot(); snap.Accounts[0].Error == "" {
+				t.Error("the failure was not reported on the account view")
+			}
+
+			// GitHub recovers. Wake the loops out of their backoff until each has
+			// polled again; the retry loop is because a loop may not be parked yet.
+			fake.setErrors(nil, nil)
+			deadline = time.Now().Add(5 * time.Second)
+			for {
+				p.Wake()
+				inbox, work := fake.calls()
+				if inbox >= 2 && work >= 2 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("loops did not poll again after a %s: calls = inbox %d work %d", tc.name, inbox, work)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			select {
+			case <-done:
+				t.Fatalf("Run returned after a %s: the account was stopped", tc.name)
+			default:
+			}
+			deadline = time.Now().Add(5 * time.Second)
+			for p.Snapshot().Accounts[0].Error != "" {
+				if time.Now().After(deadline) {
+					t.Fatalf("Error = %q after recovery, want cleared", p.Snapshot().Accounts[0].Error)
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+	}
+}
+
+// TestRetryWait pins how a loop picks its next wait after a failure.
+func TestRetryWait(t *testing.T) {
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	base := time.Minute
+	throttled := func(at time.Time) error {
+		return &forge.APIError{Op: "workload", Status: 403, RetryAt: at, Class: forge.ErrThrottled}
+	}
+	for _, tc := range []struct {
+		name  string
+		err   error
+		fails int
+		want  time.Duration
+	}{
+		{"a 502 backs off", &forge.APIError{Op: "workload", Status: 502, Class: forge.ErrTransient}, 1, 2 * time.Minute},
+		{"a plain error backs off", errors.New("boom"), 2, 4 * time.Minute},
+		{"a primary limit waits for the reset", throttled(now.Add(90 * time.Second)), 1, 90 * time.Second},
+		{"a secondary limit waits for Retry-After", throttled(now.Add(60 * time.Second)), 3, 60 * time.Second},
+		{"a reset hours away is capped", throttled(now.Add(3 * time.Hour)), 1, backoffMax},
+		{"a reset already past backs off", throttled(now.Add(-time.Second)), 1, 2 * time.Minute},
+		{"throttled with no hint backs off", throttled(time.Time{}), 1, 2 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryWait(base, tc.fails, tc.err, now); got != tc.want {
+				t.Errorf("retryWait = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunHonoursRetryAt proves the loop itself consults the wait GitHub named,
+// not just the helper: a reset a few milliseconds away is polled after,
+// where backoff would have parked the loop for the full quarter hour.
+func TestRunHonoursRetryAt(t *testing.T) {
+	fake := newFake("a")
+	fake.setErrors(
+		&forge.APIError{Op: "notifications", Status: 403, RetryAt: time.Now().Add(20 * time.Millisecond), Class: forge.ErrThrottled},
+		&forge.APIError{Op: "workload", Status: 403, RetryAt: time.Now().Add(20 * time.Millisecond), Class: forge.ErrThrottled},
+	)
+	p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go p.Run(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		inbox, work := fake.calls()
+		if inbox >= 2 && work >= 2 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("loops did not poll again at the reset: calls = inbox %d work %d", inbox, work)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestRunKeepsUnresolvedLists pins what a partial answer does to the view: a
+// list GitHub could not resolve keeps its previous value, the others take
+// the fresh one, and the view says the answer was partial. Blanking the
+// review queue and reporting health would be the worst failure on offer.
+func TestRunKeepsUnresolvedLists(t *testing.T) {
+	fake := newFake("a")
+	fake.setWork(forge.Workload{
+		Login:          "a",
+		AuthoredPRs:    []forge.PullRequest{{Repo: "o/r", Number: 7}},
+		ReviewRequests: []forge.PullRequest{{Repo: "o/r", Number: 1}},
+	})
+	p := New([]Client{fake}, quietLogger(), time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Run(ctx)
+	}()
+
+	view := func(ready func(AccountView) bool) AccountView {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			v := p.Snapshot().Accounts[0]
+			if ready(v) {
+				return v
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("view never reached the expected state: %+v", v)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	view(func(v AccountView) bool { return len(v.ReviewRequests) == 1 && len(v.AuthoredPRs) == 1 })
+
+	// The next answer resolves authored but not reviewing.
+	fake.setWork(forge.Workload{
+		Login:       "a",
+		AuthoredPRs: []forge.PullRequest{{Repo: "o/r", Number: 8}},
+		Warnings:    []string{"Resource not accessible by integration"},
+		Unresolved:  []string{"reviewRequests"},
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.Wake()
+		if _, work := fake.calls(); work >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the work loop did not poll again")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	v := view(func(v AccountView) bool { return len(v.AuthoredPRs) == 1 && v.AuthoredPRs[0].Number == 8 })
+	if len(v.ReviewRequests) != 1 || v.ReviewRequests[0].Number != 1 {
+		t.Errorf("ReviewRequests = %+v, want the previous value kept", v.ReviewRequests)
+	}
+	if !strings.Contains(v.Error, "partially") || !strings.Contains(v.Error, "not accessible") {
+		t.Errorf("Error = %q, want it to say the answer was partial and why", v.Error)
+	}
+	select {
+	case <-done:
+		t.Fatal("Run returned: a partial answer stopped the account")
+	default:
 	}
 }

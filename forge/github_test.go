@@ -1,9 +1,12 @@
 package forge
 
 import (
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -240,6 +243,11 @@ func TestWorkSurfacesGraphQLErrors(t *testing.T) {
 	if got := err.Error(); !strings.Contains(got, "doesn't accept argument") {
 		t.Errorf("error = %q, want it to carry the GraphQL message", got)
 	}
+	// A schema error is ours to fix. Backing off is harmless; stopping the
+	// account would hide it.
+	if !errors.Is(err, ErrTransient) {
+		t.Errorf("error = %v, want ErrTransient", err)
+	}
 }
 
 // TestWorkSurfacesIncomingPullRequests covers the case the workload query used
@@ -445,74 +453,277 @@ func TestInboxLoopingLinkStops(t *testing.T) {
 	}
 }
 
-func TestInboxStatusMapping(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		status  int
-		headers map[string]string
-		class   string
-	}{
-		{"401", http.StatusUnauthorized, nil, "unauthorized"},
-		// A bare 403 carries no sign of a spent budget. GitHub answers 403 for
-		// a missing scope, for SSO enforcement and for a suspended token, none
-		// of which clear on their own, so retrying for ever would hide them.
-		{"403 with no rate signal", http.StatusForbidden, nil, "unauthorized"},
-		{"403 primary limit", http.StatusForbidden,
-			map[string]string{"X-RateLimit-Remaining": "0"}, "recoverable"},
-		{"403 secondary limit", http.StatusForbidden,
-			map[string]string{"X-RateLimit-Remaining": "482", "Retry-After": "60"}, "recoverable"},
-		{"429", http.StatusTooManyRequests, nil, "recoverable"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				for k, v := range tc.headers {
-					w.Header().Set(k, v)
-				}
-				w.WriteHeader(tc.status)
-			}))
-			defer srv.Close()
+// statusCases is the classification both transports share. wait says what
+// RetryAt must hold: nothing, the X-RateLimit-Reset time, or now plus
+// Retry-After.
+var statusCases = []struct {
+	name    string
+	status  int
+	headers map[string]string
+	class   error
+	wait    string
+}{
+	{"401", http.StatusUnauthorized, nil, ErrUnauthorized, "none"},
+	// A bare 403 is a missing scope, SSO enforcement or a suspended token.
+	// The token still works, so the account keeps polling and the error is
+	// reported rather than the loop stopped.
+	{"403 with no rate signal", http.StatusForbidden, nil, ErrBlocked, "none"},
+	{"403 primary limit", http.StatusForbidden,
+		map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "RESET"}, ErrThrottled, "reset"},
+	{"403 secondary limit", http.StatusForbidden,
+		map[string]string{"X-RateLimit-Remaining": "482", "Retry-After": "60"}, ErrThrottled, "after"},
+	// Retry-After wins when both are present.
+	{"403 with both signals", http.StatusForbidden,
+		map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "RESET", "Retry-After": "60"}, ErrThrottled, "after"},
+	{"429 with no hint", http.StatusTooManyRequests, nil, ErrThrottled, "none"},
+	{"404", http.StatusNotFound, nil, ErrBlocked, "none"},
+	{"422", http.StatusUnprocessableEntity, nil, ErrTransient, "none"},
+	{"500", http.StatusInternalServerError, nil, ErrTransient, "none"},
+	// The regression #5 exists for: a bad gateway used to read as a dead token.
+	{"502", http.StatusBadGateway, nil, ErrTransient, "none"},
+	{"503", http.StatusServiceUnavailable, nil, ErrTransient, "none"},
+	{"504", http.StatusGatewayTimeout, nil, ErrTransient, "none"},
+}
 
-			c := testClient(t, srv)
-			_, _, _, _, err := c.inboxAt(t.Context(), srv.URL, InboxState{})
-			if err == nil {
-				t.Fatalf("%s should surface an error, got nil", tc.name)
+// statusStub answers every request with one status and the case's headers,
+// substituting a real reset time for RESET.
+func statusStub(t *testing.T, status int, headers map[string]string, reset time.Time) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k, v := range headers {
+			if v == "RESET" {
+				v = strconv.FormatInt(reset.Unix(), 10)
 			}
-			if got := errors.Is(err, ErrUnauthorized); got != (tc.class == "unauthorized") {
-				t.Fatalf("%s: ErrUnauthorized = %v, want %v (%v)", tc.name, got, tc.class == "unauthorized", err)
+			w.Header().Set(k, v)
+		}
+		w.WriteHeader(status)
+		w.Write([]byte(`{"message":"from github"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// checkClass asserts the class, the status, the message and the wait of one
+// classified error. before is the instant just before the request was made.
+func checkClass(t *testing.T, err error, class error, wait string, reset, before time.Time) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	if !errors.Is(err, class) {
+		t.Fatalf("errors.Is(%v, %v) = false", err, class)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("%v is not an *APIError", err)
+	}
+	if !strings.Contains(apiErr.Message, "from github") {
+		t.Errorf("Message = %q, want the body's message", apiErr.Message)
+	}
+	switch wait {
+	case "none":
+		if !apiErr.RetryAt.IsZero() {
+			t.Errorf("RetryAt = %v, want zero", apiErr.RetryAt)
+		}
+	case "reset":
+		if !apiErr.RetryAt.Equal(reset) {
+			t.Errorf("RetryAt = %v, want the reset time %v", apiErr.RetryAt, reset)
+		}
+	case "after":
+		low, high := before.Add(60*time.Second), time.Now().Add(60*time.Second)
+		if apiErr.RetryAt.Before(low) || apiErr.RetryAt.After(high) {
+			t.Errorf("RetryAt = %v, want now plus Retry-After, between %v and %v", apiErr.RetryAt, low, high)
+		}
+	}
+}
+
+func TestInboxStatusMapping(t *testing.T) {
+	reset := time.Unix(time.Now().Add(time.Hour).Unix(), 0)
+	for _, tc := range statusCases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := statusStub(t, tc.status, tc.headers, reset)
+			before := time.Now()
+			_, _, _, _, err := testClient(t, srv).inboxAt(t.Context(), srv.URL, InboxState{})
+			checkClass(t, err, tc.class, tc.wait, reset, before)
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && (apiErr.Op != "notifications" || apiErr.Status != tc.status) {
+				t.Errorf("APIError = %+v, want op notifications and status %d", apiErr, tc.status)
 			}
 		})
 	}
 }
 
 func TestWorkStatusMapping(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		status  int
-		headers map[string]string
-		class   string
-	}{
-		{"401", http.StatusUnauthorized, nil, "unauthorized"},
-		{"403 with no rate signal", http.StatusForbidden, nil, "unauthorized"},
-		{"403 primary limit", http.StatusForbidden,
-			map[string]string{"X-RateLimit-Remaining": "0"}, "recoverable"},
-		{"429", http.StatusTooManyRequests, nil, "recoverable"},
-	} {
+	reset := time.Unix(time.Now().Add(time.Hour).Unix(), 0)
+	for _, tc := range statusCases {
 		t.Run(tc.name, func(t *testing.T) {
+			srv := statusStub(t, tc.status, tc.headers, reset)
+			before := time.Now()
+			_, _, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+			checkClass(t, err, tc.class, tc.wait, reset, before)
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && (apiErr.Op != "workload" || apiErr.Status != tc.status) {
+				t.Errorf("APIError = %+v, want op workload and status %d", apiErr, tc.status)
+			}
+		})
+	}
+}
+
+// TestTransportFailureIsTransient pins a server that cannot be reached at all
+// as a failure to back off from, with the dial error still in the chain.
+func TestTransportFailureIsTransient(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	c := testClient(t, srv)
+	url := srv.URL
+	srv.Close()
+
+	_, _, _, _, err := c.inboxAt(t.Context(), url, InboxState{})
+	if !errors.Is(err, ErrTransient) {
+		t.Errorf("inbox against a dead server = %v, want ErrTransient", err)
+	}
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		t.Errorf("inbox error %v no longer carries the dial error", err)
+	}
+	if _, _, err := c.workAt(t.Context(), url); !errors.Is(err, ErrTransient) {
+		t.Errorf("work against a dead server = %v, want ErrTransient", err)
+	}
+}
+
+// TestWorkRateLimitArrivesAs200 covers the shape GitHub documents for a
+// GraphQL primary limit: status 200, a RATE_LIMITED error and the budget
+// headers. It used to read as an ordinary query error.
+func TestWorkRateLimitArrivesAs200(t *testing.T) {
+	reset := time.Unix(time.Now().Add(30*time.Minute).Unix(), 0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded for user ID 1."}]}`))
+	}))
+	defer srv.Close()
+
+	_, rate, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+	if !errors.Is(err, ErrThrottled) {
+		t.Fatalf("error = %v, want ErrThrottled", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || !apiErr.RetryAt.Equal(reset) {
+		t.Errorf("RetryAt = %v, want the reset time %v", apiErr.RetryAt, reset)
+	}
+	if rate.Remaining != 0 || !rate.ResetsAt.Equal(reset) {
+		t.Errorf("rate = %+v, want the headers read", rate)
+	}
+}
+
+// TestWorkAccessErrorsAreBlocked pins the typed errors that mean the token
+// works but cannot see something: reported, never a reason to stop.
+func TestWorkAccessErrorsAreBlocked(t *testing.T) {
+	for _, typ := range []string{"FORBIDDEN", "NOT_FOUND", "INSUFFICIENT_SCOPES"} {
+		t.Run(typ, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				for k, v := range tc.headers {
-					w.Header().Set(k, v)
-				}
-				w.WriteHeader(tc.status)
+				w.Write([]byte(`{"data":null,"errors":[{"type":"` + typ + `","message":"nope"}]}`))
 			}))
 			defer srv.Close()
 
-			c := testClient(t, srv)
-			_, _, err := c.workAt(t.Context(), srv.URL)
-			if err == nil {
-				t.Fatalf("%s should surface an error, got nil", tc.name)
+			_, _, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+			if !errors.Is(err, ErrBlocked) {
+				t.Fatalf("error = %v, want ErrBlocked", err)
 			}
-			if got := errors.Is(err, ErrUnauthorized); got != (tc.class == "unauthorized") {
-				t.Fatalf("%s: ErrUnauthorized = %v, want %v (%v)", tc.name, got, tc.class == "unauthorized", err)
+			if !strings.Contains(err.Error(), "nope") {
+				t.Errorf("error = %q, want it to carry the GraphQL message", err)
+			}
+		})
+	}
+}
+
+// TestWorkKeepsPartialData pins that a response carrying data and errors
+// yields the data, with the errors kept as warnings rather than discarding
+// the sub-queries that worked.
+func TestWorkKeepsPartialData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":{
+			"viewer":{"login":"tester"},
+			"authored":{"nodes":[{
+				"number":1,"title":"a pr","url":"https://github.com/o/r/pull/1",
+				"author":{"login":"tester"},"repository":{"nameWithOwner":"o/r"}
+			}]},
+			"reviewing":null
+		},"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration","path":["reviewing"]}]}`))
+	}))
+	defer srv.Close()
+
+	work, _, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+	if err != nil {
+		t.Fatalf("Work = %v, want the partial data with no error", err)
+	}
+	if work.Login != "tester" || len(work.AuthoredPRs) != 1 {
+		t.Errorf("work = %+v, want the viewer and the one authored pr", work)
+	}
+	if len(work.Warnings) != 1 || !strings.Contains(work.Warnings[0], "not accessible") {
+		t.Errorf("Warnings = %v, want the one GraphQL error", work.Warnings)
+	}
+	// reviewing was nulled, so reviewRequests is unresolved. The lists the
+	// fixture leaves out entirely count too, since nothing came back for them.
+	want := []string{"assignedIssues", "authoredIssues", "mergedPrs", "reviewRequests"}
+	if !slices.Equal(work.Unresolved, want) {
+		t.Errorf("Unresolved = %v, want %v", work.Unresolved, want)
+	}
+	if work.Resolved("reviewRequests") || !work.Resolved("authoredPrs") {
+		t.Error("Resolved does not follow Unresolved")
+	}
+}
+
+// TestWorkDiscardsUnattributableErrors pins the fallback: an error that
+// names no path while every field came back leaves nothing known to be
+// whole, so the answer is refused rather than trusted in part.
+func TestWorkDiscardsUnattributableErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":{
+			"viewer":{"login":"tester"},
+			"authored":{"nodes":[]},"reviewing":{"nodes":[]},"incoming":{"nodes":[]},
+			"merged":{"nodes":[]},"assigned":{"nodes":[]},"authoredIssues":{"nodes":[]}
+		},"errors":[{"message":"something went wrong while executing your query"}]}`))
+	}))
+	defer srv.Close()
+
+	_, _, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("Work = %v, want the answer refused as ErrTransient", err)
+	}
+}
+
+// TestUnresolvedLists pins how errors are pinned to lists.
+func TestUnresolvedLists(t *testing.T) {
+	whole := map[string]json.RawMessage{}
+	for field := range workloadLists {
+		whole[field] = json.RawMessage(`{}`)
+	}
+	withNull := map[string]json.RawMessage{}
+	for field := range workloadLists {
+		withNull[field] = json.RawMessage(`{}`)
+	}
+	withNull["merged"] = json.RawMessage(`null`)
+
+	for _, tc := range []struct {
+		name       string
+		fields     map[string]json.RawMessage
+		errs       []gqlError
+		want       []string
+		attributed bool
+	}{
+		{"no errors, every field present", whole, nil, nil, true},
+		{"a nulled field with no path", withNull, []gqlError{{Message: "x"}}, []string{"mergedPrs"}, true},
+		{"a path into a present field", whole, []gqlError{{Path: []any{"incoming", "nodes", 3.0}}}, []string{"reviewRequests"}, true},
+		{"a path nobody asked for", whole, []gqlError{{Path: []any{"weeks"}}}, nil, false},
+		{"no path and nothing nulled", whole, []gqlError{{Message: "x"}}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, attributed := unresolvedLists(tc.fields, tc.errs)
+			if attributed != tc.attributed || !slices.Equal(got, tc.want) {
+				t.Errorf("unresolvedLists = %v, %v; want %v, %v", got, attributed, tc.want, tc.attributed)
 			}
 		})
 	}

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,9 +25,106 @@ import (
 // endpoint cannot exhaust memory.
 const maxBody = 8 << 20
 
-// ErrUnauthorized means the token was rejected. The poller stops retrying on
-// its normal cadence when it sees this, because retrying will not help.
-var ErrUnauthorized = errors.New("token rejected")
+// The poller acts on the class of a failure and nothing else.
+var (
+	// ErrUnauthorized means the token was rejected. Retrying will not help,
+	// so the account stops.
+	ErrUnauthorized = errors.New("token rejected")
+	// ErrThrottled means the budget is spent. GitHub names the time it will
+	// answer again, and the poller waits for it.
+	ErrThrottled = errors.New("rate limited")
+	// ErrTransient means GitHub or the network failed. The poller backs off.
+	ErrTransient = errors.New("temporary failure")
+	// ErrBlocked means the token works but this resource is not accessible:
+	// a missing scope, a private repository, a permission GitHub hides
+	// behind a 404. The poller reports it and keeps polling.
+	ErrBlocked = errors.New("not accessible")
+)
+
+// APIError carries what the class alone cannot: the status, and the time
+// GitHub said it would answer again.
+type APIError struct {
+	Op      string
+	Status  int
+	RetryAt time.Time // zero when GitHub gave no hint
+	Message string
+	Class   error // one of the sentinels above, returned by Unwrap
+	cause   error // the transport error, when there was one
+}
+
+func (e *APIError) Error() string {
+	var b strings.Builder
+	b.WriteString(e.Op + ": " + e.Class.Error())
+	if e.Status != 0 {
+		fmt.Fprintf(&b, " (%d)", e.Status)
+	}
+	if e.Message != "" {
+		b.WriteString(": " + e.Message)
+	}
+	return b.String()
+}
+
+// Unwrap exposes the class to errors.Is, and the transport error behind a
+// transient failure when there was one.
+func (e *APIError) Unwrap() []error {
+	if e.cause != nil {
+		return []error{e.Class, e.cause}
+	}
+	return []error{e.Class}
+}
+
+// transportError wraps a failure to reach GitHub at all.
+func transportError(op string, err error) *APIError {
+	return &APIError{Op: op, Message: err.Error(), Class: ErrTransient, cause: err}
+}
+
+// classify turns a response other than 200 into an APIError. Only 401 is
+// permanent. A spent budget carries its reset time. 400 and 422 mean the
+// request itself is wrong, which backing off cannot fix but stopping would
+// hide. Every other 3xx and 4xx, including a 403 with no rate signal and the
+// 404 GitHub answers for anything private, is the token working and this
+// resource not being reachable. The rest is GitHub's problem and passes.
+func classify(op string, resp *http.Response) *APIError {
+	e := &APIError{Op: op, Status: resp.StatusCode, Message: apiMessage(resp.Body)}
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		e.Class = ErrUnauthorized
+	case rateLimited(resp.StatusCode, resp.Header):
+		e.Class = ErrThrottled
+		e.RetryAt = retryAt(resp.Header, time.Now())
+	case resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity:
+		e.Class = ErrTransient
+		e.Message = "the request was rejected, this is a bug: " + e.Message
+	case resp.StatusCode >= 500:
+		e.Class = ErrTransient
+	case resp.StatusCode >= 300:
+		e.Class = ErrBlocked
+	default:
+		e.Class = ErrTransient
+	}
+	return e
+}
+
+// apiMessage reads the message GitHub puts in an error body, or "" when the
+// body is not that shape.
+func apiMessage(body io.Reader) string {
+	var out struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(io.LimitReader(body, 64<<10)).Decode(&out); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.Message)
+}
+
+// retryAt is when GitHub said to try again. Retry-After, which is how a
+// secondary limit speaks, wins over the primary limit's reset time.
+func retryAt(h http.Header, now time.Time) time.Time {
+	if secs, err := strconv.Atoi(h.Get("Retry-After")); err == nil && secs > 0 {
+		return now.Add(time.Duration(secs) * time.Second)
+	}
+	return readRate(h).ResetsAt
+}
 
 // Client is a read-only GitHub client for a single account.
 type Client struct {
@@ -124,7 +222,7 @@ func (c *Client) inboxAt(ctx context.Context, base string, state InboxState) (it
 
 		resp, doErr := c.http.Do(req)
 		if doErr != nil {
-			return nil, state, false, Rate{}, fmt.Errorf("fetching notifications: %w", doErr)
+			return nil, state, false, Rate{}, transportError("notifications", doErr)
 		}
 
 		if v := resp.Header.Get("X-Poll-Interval"); v != "" {
@@ -141,19 +239,12 @@ func (c *Client) inboxAt(ctx context.Context, base string, state InboxState) (it
 			resp.Body.Close()
 			return nil, next, true, rate, nil
 		case http.StatusOK:
-		case http.StatusUnauthorized:
-			// A token GitHub genuinely rejects is a permanent condition: the
-			// poller stops the account rather than wasting its backoff.
-			resp.Body.Close()
-			return nil, state, false, rate, fmt.Errorf("notifications: %w (%s)", ErrUnauthorized, resp.Status)
 		default:
-			resp.Body.Close()
-			if !rateLimited(resp.StatusCode, resp.Header) {
-				return nil, next, false, rate, fmt.Errorf("notifications: %w (%s)", ErrUnauthorized, resp.Status)
-			}
 			// next, not state: GitHub sends X-Poll-Interval precisely on a
 			// throttled answer to say how long to wait, and it was read above.
-			return nil, next, false, rate, fmt.Errorf("notifications returned %s", resp.Status)
+			apiErr := classify("notifications", resp)
+			resp.Body.Close()
+			return nil, next, false, rate, apiErr
 		}
 
 		// Last-Modified is a property of the whole list, taken from the first
@@ -251,9 +342,9 @@ func nextLink(header, base string) string {
 // rateLimited reports whether a refusal is the quota running out rather than
 // the token being wrong. GitHub answers 403 for both, and also for a missing
 // scope, for SSO enforcement and for a suspended token, none of which clear on
-// their own. Treating every 403 as recoverable leaves a wrongly-scoped token
-// retrying for ever and never telling anyone why nothing works, which is the
-// same silence this distinction exists to remove, pointed the other way.
+// their own. Those are classified as blocked: reported on the account every
+// cycle and polled on, rather than mistaken for a spent budget with a reset
+// time to wait for.
 // Reads the headers rather than the parsed Rate on purpose: readRate turns a
 // missing X-RateLimit-Remaining into 0 through Atoi, so "we were not told"
 // would be indistinguishable from "the budget is spent" and every 403 would
@@ -326,6 +417,17 @@ type Workload struct {
 	// MergedPRs are recently merged pull requests of yours. They are what makes
 	// a finished local branch identifiable as finished.
 	MergedPRs []PullRequest `json:"mergedPrs"`
+	// Warnings are the errors GitHub sent alongside the data, and Unresolved
+	// names the lists those errors nulled, by their JSON names above. A
+	// caller keeps whatever it already had for an unresolved list rather
+	// than reading the empty one here as the truth.
+	Warnings   []string `json:"warnings,omitempty"`
+	Unresolved []string `json:"unresolved,omitempty"`
+}
+
+// Resolved reports whether the named list came back from GitHub this time.
+func (w Workload) Resolved(list string) bool {
+	return !slices.Contains(w.Unresolved, list)
 }
 
 // workloadQuery asks for the three attention lists plus the head-commit check
@@ -414,52 +516,54 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return Workload{}, Rate{}, fmt.Errorf("running workload query: %w", err)
+		return Workload{}, Rate{}, transportError("workload", err)
 	}
 	defer resp.Body.Close()
 
 	rate := readRate(resp.Header)
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusUnauthorized:
-		return Workload{}, rate, fmt.Errorf("workload: %w (%s)", ErrUnauthorized, resp.Status)
-	default:
-		if !rateLimited(resp.StatusCode, resp.Header) {
-			return Workload{}, rate, fmt.Errorf("workload: %w (%s)", ErrUnauthorized, resp.Status)
-		}
-		// A spent budget is recoverable: back off rather than stop the account.
-		return Workload{}, rate, fmt.Errorf("workload query returned %s", resp.Status)
+	if resp.StatusCode != http.StatusOK {
+		return Workload{}, rate, classify("workload", resp)
 	}
 
+	// Data is kept raw so a response carrying both data and errors can be
+	// told from one carrying errors alone.
 	var out struct {
-		Data struct {
-			Viewer struct {
-				Login string `json:"login"`
-			} `json:"viewer"`
-			Authored       struct{ Nodes []gqlPR }    `json:"authored"`
-			Reviewing      struct{ Nodes []gqlPR }    `json:"reviewing"`
-			Incoming       struct{ Nodes []gqlPR }    `json:"incoming"`
-			Merged         struct{ Nodes []gqlPR }    `json:"merged"`
-			Assigned       struct{ Nodes []gqlIssue } `json:"assigned"`
-			AuthoredIssues struct{ Nodes []gqlIssue } `json:"authoredIssues"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
+		Data   json.RawMessage `json:"data"`
+		Errors []gqlError      `json:"errors"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&out); err != nil {
 		return Workload{}, rate, fmt.Errorf("decoding workload: %w", err)
 	}
-	if len(out.Errors) > 0 {
-		return Workload{}, rate, fmt.Errorf("workload query: %s", out.Errors[0].Message)
+	if len(out.Errors) > 0 && !hasData(out.Data) {
+		return Workload{}, rate, classifyGraphQL("workload", out.Errors, resp.Header)
+	}
+	var data gqlWorkload
+	var fields map[string]json.RawMessage
+	if hasData(out.Data) {
+		if err := json.Unmarshal(out.Data, &data); err != nil {
+			return Workload{}, rate, fmt.Errorf("decoding workload: %w", err)
+		}
+		if err := json.Unmarshal(out.Data, &fields); err != nil {
+			return Workload{}, rate, fmt.Errorf("decoding workload: %w", err)
+		}
+	}
+	// Partial data is used only when every error can be pinned to a list.
+	// Otherwise nothing in the answer can be trusted, and the previous
+	// answer is better than this one.
+	unresolved, attributed := unresolvedLists(fields, out.Errors)
+	if !attributed {
+		return Workload{}, rate, classifyGraphQL("workload", out.Errors, resp.Header)
 	}
 
-	work := Workload{Login: out.Data.Viewer.Login}
-	for _, n := range out.Data.Authored.Nodes {
+	work := Workload{Login: data.Viewer.Login, Unresolved: unresolved}
+	for _, e := range out.Errors {
+		work.Warnings = append(work.Warnings, e.Message)
+	}
+	for _, n := range data.Authored.Nodes {
 		work.AuthoredPRs = append(work.AuthoredPRs, c.toPR(n))
 	}
 	seen := make(map[string]struct{})
-	for _, n := range out.Data.Reviewing.Nodes {
+	for _, n := range data.Reviewing.Nodes {
 		pr := c.toPR(n)
 		seen[pr.URL] = struct{}{}
 		work.ReviewRequests = append(work.ReviewRequests, pr)
@@ -469,7 +573,7 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 	// an outside contributor cannot ask, and without a CODEOWNERS file nobody
 	// asks on their behalf. For a solo maintainer that is the whole of the
 	// inbound work, and it was invisible.
-	for _, n := range out.Data.Incoming.Nodes {
+	for _, n := range data.Incoming.Nodes {
 		pr := c.toPR(n)
 		if _, already := seen[pr.URL]; already {
 			continue
@@ -481,16 +585,113 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 		seen[pr.URL] = struct{}{}
 		work.ReviewRequests = append(work.ReviewRequests, pr)
 	}
-	for _, n := range out.Data.Merged.Nodes {
+	for _, n := range data.Merged.Nodes {
 		work.MergedPRs = append(work.MergedPRs, c.toPR(n))
 	}
-	for _, n := range out.Data.Assigned.Nodes {
+	for _, n := range data.Assigned.Nodes {
 		work.AssignedIssues = append(work.AssignedIssues, c.toIssue(n))
 	}
-	for _, n := range out.Data.AuthoredIssues.Nodes {
+	for _, n := range data.AuthoredIssues.Nodes {
 		work.AuthoredIssues = append(work.AuthoredIssues, c.toIssue(n))
 	}
 	return work, rate, nil
+}
+
+// gqlWorkload is the shape of the data field of the workload query.
+type gqlWorkload struct {
+	Viewer struct {
+		Login string `json:"login"`
+	} `json:"viewer"`
+	Authored       struct{ Nodes []gqlPR }    `json:"authored"`
+	Reviewing      struct{ Nodes []gqlPR }    `json:"reviewing"`
+	Incoming       struct{ Nodes []gqlPR }    `json:"incoming"`
+	Merged         struct{ Nodes []gqlPR }    `json:"merged"`
+	Assigned       struct{ Nodes []gqlIssue } `json:"assigned"`
+	AuthoredIssues struct{ Nodes []gqlIssue } `json:"authoredIssues"`
+}
+
+// gqlError is one entry of a GraphQL errors array. Type is how GitHub says
+// what went wrong; a schema error has none. Path leads to the field the
+// error nulled, starting with one of the query's top-level names.
+type gqlError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Path    []any  `json:"path"`
+}
+
+// hasData reports whether a GraphQL data field holds anything to decode.
+func hasData(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
+}
+
+// workloadLists maps each top-level field of the query to the Workload list
+// it feeds, by JSON name. reviewing and incoming both feed reviewRequests.
+var workloadLists = map[string]string{
+	"viewer":         "login",
+	"authored":       "authoredPrs",
+	"reviewing":      "reviewRequests",
+	"incoming":       "reviewRequests",
+	"merged":         "mergedPrs",
+	"assigned":       "assignedIssues",
+	"authoredIssues": "authoredIssues",
+}
+
+// unresolvedLists names the lists the answer did not deliver: a top-level
+// field that is null or absent, or one an error's path points into. It
+// reports false when an error cannot be pinned to any list, because then no
+// part of the data is known to be whole.
+func unresolvedLists(fields map[string]json.RawMessage, errs []gqlError) ([]string, bool) {
+	var out []string
+	add := func(list string) {
+		if !slices.Contains(out, list) {
+			out = append(out, list)
+		}
+	}
+	nulled := false
+	for field, list := range workloadLists {
+		if raw, ok := fields[field]; !ok || string(raw) == "null" {
+			add(list)
+			nulled = true
+		}
+	}
+	for _, e := range errs {
+		if len(e.Path) == 0 {
+			// No path: the nulled field says what failed, if there is one.
+			if !nulled {
+				return nil, false
+			}
+			continue
+		}
+		top, _ := e.Path[0].(string)
+		list, known := workloadLists[top]
+		if !known {
+			return nil, false
+		}
+		add(list)
+	}
+	slices.Sort(out)
+	return out, true
+}
+
+// classifyGraphQL maps the typed errors a 200 can carry. A primary rate limit
+// arrives this way, as HTTP 200 with RATE_LIMITED and the budget headers, and
+// it wins over anything else in the array. Access failures are blocked, and
+// an untyped error is a schema problem, which is ours.
+func classifyGraphQL(op string, errs []gqlError, h http.Header) *APIError {
+	e := &APIError{Op: op, Status: http.StatusOK, Message: errs[0].Message, Class: ErrTransient}
+	for _, ge := range errs {
+		switch ge.Type {
+		case "RATE_LIMITED":
+			e.Class = ErrThrottled
+			e.RetryAt = retryAt(h, time.Now())
+			e.Message = ge.Message
+			return e
+		case "FORBIDDEN", "NOT_FOUND", "INSUFFICIENT_SCOPES":
+			e.Class = ErrBlocked
+			e.Message = ge.Message
+		}
+	}
+	return e
 }
 
 // gqlIssue is the issueFields fragment as it comes back, shared by both issue

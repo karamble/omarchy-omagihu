@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -283,6 +284,8 @@ func (p *Poller) inboxLoop(ctx context.Context, c Client) {
 				v.Error = err.Error()
 				v.Rate = rate
 			})
+			// Only a rejected token stops the loop. Everything else, a spent
+			// budget, a 502, a resource the token cannot see, backs off.
 			if errors.Is(err, forge.ErrUnauthorized) {
 				p.logger.Error("inbox: token rejected, pausing this account",
 					"account", c.Account().ID, "err", err)
@@ -316,7 +319,7 @@ func (p *Poller) inboxLoop(ctx context.Context, c Client) {
 			wait = state.PollInterval
 		}
 		if fails > 0 {
-			wait = backoff(wait, fails)
+			wait = retryWait(wait, fails, err, time.Now())
 		}
 		// Force-aware wait: returns immediately if a ForceRefresh() bumped the
 		// generation while this loop slept or was between calls, so no account
@@ -356,14 +359,35 @@ func (p *Poller) workLoop(ctx context.Context, c Client) {
 			p.logger.Warn("workload poll failed", "account", c.Account().ID, "err", err, "fails", fails)
 		} else {
 			fails = 0
+			// A partial answer is a success with holes: the lists GitHub did
+			// not deliver keep their previous values, and the view says why.
+			if len(work.Warnings) > 0 {
+				p.logger.Warn("workload answered partially",
+					"account", c.Account().ID, "errors", work.Warnings, "unresolved", work.Unresolved)
+			}
 			p.update(c, func(v *AccountView) {
 				v.Error = ""
-				v.Login = work.Login
-				v.AuthoredPRs = work.AuthoredPRs
-				v.ReviewRequests = work.ReviewRequests
-				v.AssignedIssues = work.AssignedIssues
-				v.AuthoredIssues = work.AuthoredIssues
-				v.MergedPRs = work.MergedPRs
+				if len(work.Warnings) > 0 {
+					v.Error = "workload answered partially: " + strings.Join(work.Warnings, "; ")
+				}
+				if work.Resolved("login") {
+					v.Login = work.Login
+				}
+				if work.Resolved("authoredPrs") {
+					v.AuthoredPRs = work.AuthoredPRs
+				}
+				if work.Resolved("reviewRequests") {
+					v.ReviewRequests = work.ReviewRequests
+				}
+				if work.Resolved("assignedIssues") {
+					v.AssignedIssues = work.AssignedIssues
+				}
+				if work.Resolved("authoredIssues") {
+					v.AuthoredIssues = work.AuthoredIssues
+				}
+				if work.Resolved("mergedPrs") {
+					v.MergedPRs = work.MergedPRs
+				}
 				v.Rate = rate
 				v.WorkAt = time.Now()
 			})
@@ -371,7 +395,7 @@ func (p *Poller) workLoop(ctx context.Context, c Client) {
 
 		wait := time.Duration(p.workEvery.Load())
 		if fails > 0 {
-			wait = backoff(wait, fails)
+			wait = retryWait(wait, fails, err, time.Now())
 		}
 		if !p.wait(ctx, wait) {
 			return
@@ -412,6 +436,17 @@ func (p *Poller) publishLocked() {
 		snap.Accounts = append(snap.Accounts, *v)
 	}
 	p.snap.Store(snap)
+}
+
+// retryWait is how long a loop sleeps after a failure: until the time GitHub
+// named, capped by backoffMax so a misreported reset cannot park a loop for
+// hours, or the doubling backoff when it named none.
+func retryWait(base time.Duration, fails int, err error, now time.Time) time.Duration {
+	var apiErr *forge.APIError
+	if errors.As(err, &apiErr) && apiErr.RetryAt.After(now) {
+		return min(apiErr.RetryAt.Sub(now), backoffMax)
+	}
+	return backoff(base, fails)
 }
 
 // backoff grows the wait on consecutive failures, capped so a recovered network
