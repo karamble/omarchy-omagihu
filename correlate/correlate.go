@@ -130,14 +130,18 @@ func CorrelateWith(remote *poll.Snapshot, lcl *local.Snapshot, opts Options) []F
 
 	var facts []Fact
 	for _, pr := range open {
-		// UpstreamBehind is counted against the upstream remote's default
-		// branch, which is the base of a pull request opened from a fork.
 		// Approval is the gate: a branch still being worked on is expected to
 		// drift, an approved one is a click from merging and the stale base
 		// is what stops it.
 		if pr.ReviewDecision == "APPROVED" {
 			for _, repo := range prCheckouts(pr, byRepo, byUpstream) {
-				if repo.UpstreamBehind <= 0 {
+				behind, base := baseDistance(pr, repo)
+				// A distance is only worth quoting when it was measured
+				// against the branch this pull request actually merges into.
+				// One onto a release branch, or stacked on another, stays
+				// quiet rather than being told how far it is from a branch it
+				// is not going to.
+				if behind <= 0 || base == "" || base != pr.BaseRef {
 					continue
 				}
 				facts = append(facts, Fact{
@@ -146,17 +150,13 @@ func CorrelateWith(remote *poll.Snapshot, lcl *local.Snapshot, opts Options) []F
 					Repo:     pr.Repo, Path: repo.Path, Branch: repo.Branch,
 					URL: pr.URL, Number: pr.Number,
 					Summary: fmt.Sprintf("%s #%d is approved but %s behind its base",
-						repo.Name, pr.Number, plural(repo.UpstreamBehind, "commit", "commits")),
-					Detail: "counted against upstream's default branch as last fetched; a rebase brings it current",
+						repo.Name, pr.Number, plural(behind, "commit", "commits")),
+					Detail: fmt.Sprintf("counted against %s as last fetched; a rebase brings it current", base),
 				})
 			}
 		}
 
-		for _, repo := range byRepo[pr.Repo] {
-			if repo.Branch != pr.HeadRef {
-				continue
-			}
-
+		for _, repo := range prCheckouts(pr, byRepo, byUpstream) {
 			if repo.Unpushed > 0 {
 				facts = append(facts, Fact{
 					Kind:     KindMissingWork,
@@ -197,10 +197,10 @@ func CorrelateWith(remote *poll.Snapshot, lcl *local.Snapshot, opts Options) []F
 	}
 
 	for _, pr := range merged {
-		for _, repo := range byRepo[pr.Repo] {
+		for _, repo := range prCheckouts(pr, byRepo, byUpstream) {
 			// Finished means finished: nothing uncommitted and nothing unpushed,
 			// otherwise the branch still holds something.
-			if repo.Branch != pr.HeadRef || repo.Dirty() || repo.Unpushed > 0 {
+			if repo.Dirty() || repo.Unpushed > 0 {
 				continue
 			}
 			facts = append(facts, Fact{
@@ -279,6 +279,21 @@ func CorrelateWith(remote *poll.Snapshot, lcl *local.Snapshot, opts Options) []F
 
 // prCheckouts finds the checkouts sitting on a pull request's branch, whether
 // they clone the repository the pull request belongs to or a fork of it.
+// baseDistance reports how far a checkout trails the base of pr, and the
+// branch that distance was measured against. It picks the remote that is
+// actually the pull request's base repository rather than guessing: upstream
+// for a pull request opened from a fork, origin for one opened from a branch
+// in the repository itself. A checkout that is neither answers with nothing.
+func baseDistance(pr forge.PullRequest, repo local.Repo) (int, string) {
+	if NormalizeRemote(repo.Remotes["upstream"]) == pr.Repo {
+		return repo.UpstreamBehind, repo.UpstreamBase
+	}
+	if NormalizeRemote(repo.Remotes["origin"]) == pr.Repo {
+		return repo.BaseBehind, repo.BaseBranch
+	}
+	return 0, ""
+}
+
 func prCheckouts(pr forge.PullRequest, byRepo, byUpstream map[string][]local.Repo) []local.Repo {
 	var out []local.Repo
 	seen := make(map[string]struct{})

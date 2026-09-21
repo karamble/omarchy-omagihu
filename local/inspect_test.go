@@ -238,3 +238,60 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// TestInspectMeasuresTheDistanceToOriginsDefaultBranch covers the checkout
+// that is not a fork: origin and nothing else, which is a repository you can
+// push to directly. The only distance measured used to need an upstream
+// remote, the fork convention, so such a checkout reported nothing however far
+// its base had moved.
+func TestInspectMeasuresTheDistanceToOriginsDefaultBranch(t *testing.T) {
+	origin := newRepo(t)
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "clone")
+	git(t, parent, "clone", "--quiet", origin, dir)
+
+	// The base moves on after the clone.
+	write(t, filepath.Join(origin, "one.txt"), "one\n")
+	git(t, origin, "add", "one.txt")
+	git(t, origin, "commit", "--quiet", "-m", "base moves")
+	write(t, filepath.Join(origin, "two.txt"), "two\n")
+	git(t, origin, "add", "two.txt")
+	git(t, origin, "commit", "--quiet", "-m", "and again")
+
+	// Work carries on here, on a branch of its own.
+	git(t, dir, "checkout", "--quiet", "-b", "topic")
+	write(t, filepath.Join(dir, "mine.txt"), "mine\n")
+	git(t, dir, "add", "mine.txt")
+	git(t, dir, "commit", "--quiet", "-m", "my work")
+	git(t, dir, "fetch", "--quiet")
+
+	repo := Inspect(t.Context(), dir)
+	if repo.BaseBranch != "main" {
+		t.Errorf("BaseBranch = %q, want main, read from origin/HEAD", repo.BaseBranch)
+	}
+	if repo.BaseBehind != 2 {
+		t.Errorf("BaseBehind = %d, want the 2 commits the base gained since the branch left it", repo.BaseBehind)
+	}
+	if repo.UpstreamBehind != 0 || repo.UpstreamBase != "" {
+		t.Errorf("upstream = %d/%q, want nothing measured without an upstream remote",
+			repo.UpstreamBehind, repo.UpstreamBase)
+	}
+}
+
+// TestInspectHasNoBaseWithoutOriginHead covers the repository that was never
+// cloned. git init with a remote added by hand has no origin/HEAD, so nothing
+// on disk names a default branch, and measuring against a guess would be worse
+// than staying quiet.
+func TestInspectHasNoBaseWithoutOriginHead(t *testing.T) {
+	dir := newRepo(t)
+	git(t, dir, "remote", "add", "origin", "git@github.com:o/r.git")
+
+	repo := Inspect(t.Context(), dir)
+	if repo.Error != "" {
+		t.Fatalf("Error = %q, want none", repo.Error)
+	}
+	if repo.BaseBranch != "" || repo.BaseBehind != 0 {
+		t.Errorf("base = %d/%q, want nothing when origin/HEAD does not exist",
+			repo.BaseBehind, repo.BaseBranch)
+	}
+}

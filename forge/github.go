@@ -370,6 +370,10 @@ type PullRequest struct {
 	URL       string `json:"url"`
 	Author    string `json:"author"`
 	HeadRef   string `json:"headRef"`
+	// BaseRef is the branch the pull request merges into. A distance to the
+	// base is only honest when it was measured against this branch, so the
+	// correlation checks it rather than assuming the default.
+	BaseRef string `json:"baseRef,omitempty"`
 	// HeadSHA is the tip of the PR branch on the forge. Comparing it with a
 	// local HEAD is what makes "CI is red on the commit you have checked out"
 	// exact rather than a guess.
@@ -481,7 +485,7 @@ fragment issueFields on Issue {
 }
 
 fragment prFields on PullRequest {
-  number title url updatedAt isDraft headRefName headRefOid reviewDecision mergedAt
+  number title url updatedAt isDraft headRefName headRefOid baseRefName reviewDecision mergedAt
   author { login }
   repository { nameWithOwner }
   commits(last: 1) {
@@ -497,6 +501,7 @@ type gqlPR struct {
 	IsDraft        bool      `json:"isDraft"`
 	HeadRefName    string    `json:"headRefName"`
 	HeadRefOid     string    `json:"headRefOid"`
+	BaseRefName    string    `json:"baseRefName"`
 	MergedAt       time.Time `json:"mergedAt"`
 	ReviewDecision string    `json:"reviewDecision"`
 	Author         struct {
@@ -822,6 +827,7 @@ func (c *Client) toPR(n gqlPR) PullRequest {
 		URL:            n.URL,
 		Author:         n.Author.Login,
 		HeadRef:        n.HeadRefName,
+		BaseRef:        n.BaseRefName,
 		HeadSHA:        n.HeadRefOid,
 		MergedAt:       n.MergedAt,
 		IsDraft:        n.IsDraft,

@@ -103,8 +103,19 @@ type Repo struct {
 	NoUpstream bool `json:"noUpstream,omitempty"`
 
 	// UpstreamBehind is how far a fork trails the repository it was forked
-	// from, counted against the refs last fetched.
-	UpstreamBehind int `json:"upstreamBehind,omitempty"`
+	// from, counted against the refs last fetched. UpstreamBase names the
+	// branch it was counted against, so a distance is never quoted at a
+	// branch the work is not merging into.
+	UpstreamBehind int    `json:"upstreamBehind,omitempty"`
+	UpstreamBase   string `json:"upstreamBase,omitempty"`
+
+	// BaseBehind is the same distance for a checkout that is not a fork:
+	// how far it trails origin's default branch, which is what a pull request
+	// opened from a branch in the repository itself merges into. BaseBranch
+	// names it. Both are empty for a checkout that was never cloned, since
+	// such a repository has no origin/HEAD to read.
+	BaseBehind int    `json:"baseBehind,omitempty"`
+	BaseBranch string `json:"baseBranch,omitempty"`
 
 	Operation Operation         `json:"operation,omitempty"`
 	Remotes   map[string]string `json:"remotes,omitempty"`

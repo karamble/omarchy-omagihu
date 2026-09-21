@@ -1,6 +1,7 @@
 package correlate
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/karamble/omarchy-omagihu/forge"
@@ -316,12 +317,15 @@ func TestNoRemote(t *testing.T) {
 
 func TestPRBaseMoved(t *testing.T) {
 	approved := forge.PullRequest{
-		Repo: "original/thing", Number: 12, URL: "u12", HeadRef: "topic", ReviewDecision: "APPROVED",
+		Repo: "original/thing", Number: 12, URL: "u12", HeadRef: "topic", BaseRef: "main",
+		ReviewDecision: "APPROVED",
 	}
 	// A fork checkout: origin is the fork, upstream is the repository the
-	// pull request belongs to.
+	// pull request belongs to. UpstreamBase names the branch the distance was
+	// counted against, and it has to be the one the pull request merges into.
 	fork := local.Repo{
-		Name: "thing", Path: "/fork", Branch: "topic", UpstreamBehind: 8,
+		Name: "thing", Path: "/fork", Branch: "topic",
+		UpstreamBehind: 8, UpstreamBase: "main",
 		Remotes: map[string]string{
 			"origin":   "git@github.com:karamble/thing.git",
 			"upstream": "https://github.com/original/thing.git",
@@ -364,4 +368,107 @@ func TestPRBaseMoved(t *testing.T) {
 		"upstream": "https://github.com/original/thing.git",
 	}
 	find(t, Correlate(snap([]forge.PullRequest{approved}, nil), repo(clone)), KindPRBaseMoved)
+}
+
+// TestPRBaseMovedWithoutAnUpstreamRemote is the bug this kind was filed for.
+// The only distance collected used to be the one measured against an upstream
+// remote, which is the fork convention, so a pull request opened from a branch
+// in the repository itself could never raise the fact however far its base had
+// moved. That is the more common shape.
+func TestPRBaseMovedWithoutAnUpstreamRemote(t *testing.T) {
+	approved := forge.PullRequest{
+		Repo: "o/r", Number: 30, URL: "u30", HeadRef: "topic", BaseRef: "main",
+		ReviewDecision: "APPROVED",
+	}
+	// origin and nothing else: a repository you can push to directly.
+	own := local.Repo{
+		Name: "r", Path: "/own", Branch: "topic",
+		BaseBehind: 6, BaseBranch: "main",
+		Remotes: map[string]string{"origin": "git@github.com:o/r.git"},
+	}
+
+	f := find(t, Correlate(snap([]forge.PullRequest{approved}, nil), repo(own)), KindPRBaseMoved)
+	if f.Number != 30 || f.Path != "/own" {
+		t.Errorf("fact = %+v, want it to name the pull request and the checkout", f)
+	}
+	if !strings.Contains(f.Summary, "6 commits") {
+		t.Errorf("summary = %q, want the distance origin's default branch has moved", f.Summary)
+	}
+	if !strings.Contains(f.Detail, "main") {
+		t.Errorf("detail = %q, want it to name the branch the distance was counted against", f.Detail)
+	}
+
+	// Current against its base.
+	current := own
+	current.BaseBehind = 0
+	if got := Correlate(snap([]forge.PullRequest{approved}, nil), repo(current)); hasKind(got, KindPRBaseMoved) {
+		t.Errorf("kinds = %v, want no pr-base-moved when the base has not moved", kinds(got))
+	}
+}
+
+// TestPRBaseMovedChecksTheBaseBranch pins that a distance is only quoted when
+// it was measured against the branch the pull request actually merges into. A
+// pull request onto a release branch, or stacked on another, is not told how
+// far it is from a branch it is not going to.
+func TestPRBaseMovedChecksTheBaseBranch(t *testing.T) {
+	own := local.Repo{
+		Name: "r", Path: "/own", Branch: "topic",
+		BaseBehind: 6, BaseBranch: "main",
+		Remotes: map[string]string{"origin": "git@github.com:o/r.git"},
+	}
+	stacked := forge.PullRequest{
+		Repo: "o/r", Number: 31, URL: "u31", HeadRef: "topic", BaseRef: "release-2",
+		ReviewDecision: "APPROVED",
+	}
+	if got := Correlate(snap([]forge.PullRequest{stacked}, nil), repo(own)); hasKind(got, KindPRBaseMoved) {
+		t.Errorf("kinds = %v, want no pr-base-moved when the base is not the measured branch", kinds(got))
+	}
+
+	// A distance with no branch behind it says nothing about any base. This is
+	// the checkout that was never cloned and so has no origin/HEAD to read.
+	unnamed := own
+	unnamed.BaseBranch = ""
+	onMain := stacked
+	onMain.BaseRef = "main"
+	if got := Correlate(snap([]forge.PullRequest{onMain}, nil), repo(unnamed)); hasKind(got, KindPRBaseMoved) {
+		t.Errorf("kinds = %v, want no pr-base-moved when nothing names the branch measured", kinds(got))
+	}
+}
+
+// TestPullRequestKindsMatchAForkCheckout pins the second gap the base work
+// uncovered. A pull request names its base repository, so a fork's checkout is
+// only reachable through its upstream remote. pr-base-moved looked there;
+// every other pull request kind indexed on origin alone and was silently blind
+// to forks. All of these are quiet before the widening.
+func TestPullRequestKindsMatchAForkCheckout(t *testing.T) {
+	fork := local.Repo{
+		Name: "thing", Path: "/fork", Branch: "topic",
+		Unpushed: 3,
+		Last:     local.Commit{SHA: "deadbeef"},
+		Remotes: map[string]string{
+			"origin":   "git@github.com:karamble/thing.git",
+			"upstream": "https://github.com/original/thing.git",
+		},
+	}
+	open := forge.PullRequest{
+		Repo: "original/thing", Number: 12, URL: "u12", HeadRef: "topic", BaseRef: "main",
+		HeadSHA: "deadbeef", ChecksState: "FAILURE", ReviewDecision: "CHANGES_REQUESTED",
+	}
+	got := Correlate(snap([]forge.PullRequest{open}, nil), repo(fork))
+	for _, want := range []Kind{KindMissingWork, KindCIRedOnHead, KindChangesRequested} {
+		if !hasKind(got, want) {
+			t.Errorf("kinds = %v, want %s for a fork checkout reached through upstream", kinds(got), want)
+		}
+	}
+
+	// The merged loop indexed on origin too, so stale-branch missed forks the
+	// same way.
+	done := forge.PullRequest{
+		Repo: "original/thing", Number: 12, URL: "u12", HeadRef: "topic", BaseRef: "main",
+	}
+	clean := fork
+	clean.Unpushed = 0
+	if got := Correlate(snap(nil, []forge.PullRequest{done}), repo(clean)); !hasKind(got, KindStaleBranch) {
+		t.Errorf("kinds = %v, want stale-branch for a merged pull request from a fork", kinds(got))
+	}
 }

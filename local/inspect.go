@@ -42,14 +42,15 @@ func Inspect(ctx context.Context, path string) Repo {
 	repo.Last = parseLastCommit(mustRun(ctx, path,
 		"log", "-1", "--format=%H%x00%s%x00%an%x00%aI"))
 
-	// A fork's distance from the project it was forked from. This reads only
-	// refs that are already on disk, so Inspect stays free of network calls;
-	// the background fetch is what keeps it honest.
+	// How far this checkout trails the branch work opened from it would merge
+	// into: the project a fork came from, and the repository it was cloned
+	// from. Both read only refs already on disk, so Inspect stays free of
+	// network calls; the background fetch is what keeps them honest.
 	if _, forked := repo.Remotes["upstream"]; forked {
-		if n, err := strconv.Atoi(strings.TrimSpace(
-			mustRun(ctx, path, "rev-list", "--count", "HEAD..refs/remotes/upstream/HEAD"))); err == nil {
-			repo.UpstreamBehind = n
-		}
+		repo.UpstreamBase, repo.UpstreamBehind = defaultBranchDistance(ctx, path, "upstream")
+	}
+	if _, cloned := repo.Remotes["origin"]; cloned {
+		repo.BaseBranch, repo.BaseBehind = defaultBranchDistance(ctx, path, "origin")
 	}
 
 	// Unpushed is defined as commits reachable from HEAD but from no remote
@@ -361,6 +362,26 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 
 // mustRun is runGit for facts that are nice to have: a failure yields an empty
 // string rather than sinking the whole inspection.
+// defaultBranchDistance reports a remote's default branch and how far HEAD
+// trails it. A repository that was never cloned has no <remote>/HEAD, and git
+// says so rather than guessing; so does this, returning no branch and no
+// distance rather than measuring against something the work is not merging
+// into. `git remote set-head <remote> -a` is what fills it in.
+func defaultBranchDistance(ctx context.Context, dir, remote string) (string, int) {
+	ref := "refs/remotes/" + remote + "/HEAD"
+	head := strings.TrimSpace(mustRun(ctx, dir, "symbolic-ref", "--short", ref))
+	branch := strings.TrimPrefix(head, remote+"/")
+	if branch == "" || branch == head {
+		return "", 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(
+		mustRun(ctx, dir, "rev-list", "--count", "HEAD.."+ref)))
+	if err != nil {
+		return branch, 0
+	}
+	return branch, n
+}
+
 func mustRun(ctx context.Context, dir string, args ...string) string {
 	out, err := runGit(ctx, dir, args...)
 	if err != nil {

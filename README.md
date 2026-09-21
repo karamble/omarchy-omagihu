@@ -231,8 +231,12 @@ Three signals the usual repo widget does not have:
   with no remote is never flagged, because there is nowhere to push it.
 - **Interrupted operations.** A half finished rebase, an unresolved merge, a
   bisect still running. The states you find weeks later by accident.
-- **Fork divergence.** How far behind upstream your fork has drifted, without
-  going to look.
+- **Base divergence.** How far the branch you are on has fallen behind the one
+  it will merge into, without going to look: upstream's default branch for a
+  fork, origin's for a repository you push to directly. Both are read from
+  `<remote>/HEAD`, so a checkout made by `git init` rather than `git clone` has
+  nothing on disk naming its default branch until `git remote set-head origin
+  -a` fills it in.
 
 ## Removal
 
