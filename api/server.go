@@ -877,14 +877,21 @@ func (s *Server) handleEdit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var decodeErr error
-	edited, err := s.engine.Edit(r.PathValue("id"), func(t *alerts.Trigger) {
-		decodeErr = json.Unmarshal(body, t)
-	})
-	if decodeErr != nil {
+	// Decode once into a throwaway before Edit sees it. Edit applies the
+	// callback, validates, bumps the revision, clears the trigger's state and
+	// saves, all before it could be told the decode failed; a half-decoded
+	// body that still validates was being persisted behind a 400, and the
+	// cleared state made a standing watch re-prime and fire again on
+	// everything it had already seen.
+	var probe alerts.Trigger
+	if err := json.Unmarshal(body, &probe); err != nil {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{"error": "unreadable trigger"})
 		return
 	}
+	edited, err := s.engine.Edit(r.PathValue("id"), func(t *alerts.Trigger) {
+		// Cannot fail: the same bytes decoded into probe above.
+		_ = json.Unmarshal(body, t)
+	})
 	if err != nil {
 		writeJSON(w, s.logger, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

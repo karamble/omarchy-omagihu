@@ -54,8 +54,11 @@ func (s Source) alerts() (Alerts, bool) {
 	return a, true
 }
 
-// Handler builds the streamable HTTP handler to mount on the daemon's listener.
-func Handler(src Source, version string) http.Handler {
+// newServer builds the MCP server with every tool registered. Separate from
+// Handler so a test can drive the real server over an in-memory transport,
+// rather than asserting against a copy of what the tools are supposed to
+// return.
+func newServer(src Source, version string) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "omagihu",
 		Title:   "Omagihu: GitHub radar",
@@ -63,13 +66,37 @@ func Handler(src Source, version string) http.Handler {
 	}, nil)
 	register(server, src)
 	registerAlerts(server, src)
+	return server
+}
 
+// Handler builds the streamable HTTP handler to mount on the daemon's listener.
+func Handler(src Source, version string) http.Handler {
+	server := newServer(src, version)
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, nil)
 }
 
 type empty struct{}
+
+// repoRow is local.Repo as it actually goes over the wire. Repo.MarshalJSON
+// adds atRisk and dirty, which are not struct fields, and the SDK builds the
+// output schema by reflection and then validates the marshalled JSON against
+// it. Declaring them here makes the two agree. Embedding promotes Repo's
+// marshaller, so the bytes are unchanged.
+type repoRow struct {
+	local.Repo
+	AtRisk bool `json:"atRisk"`
+	Dirty  bool `json:"dirty"`
+}
+
+func repoRows(in []local.Repo) []repoRow {
+	out := make([]repoRow, 0, len(in))
+	for _, r := range in {
+		out = append(out, repoRow{Repo: r, AtRisk: r.AtRisk(), Dirty: r.Dirty()})
+	}
+	return out
+}
 
 // status rides along with every answer so a caller can tell current data from
 // the last thing seen before the daemon was put to sleep.
@@ -103,9 +130,9 @@ type workOut struct {
 }
 
 type reposOut struct {
-	Status status       `json:"status"`
-	Count  int          `json:"count"`
-	Repos  []local.Repo `json:"repos"`
+	Status status    `json:"status"`
+	Count  int       `json:"count"`
+	Repos  []repoRow `json:"repos"`
 }
 
 type factsOut struct {
@@ -153,7 +180,7 @@ func register(s *mcp.Server, src Source) {
 			"the daemon's own classification.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, reposOut, error) {
 		snap := src.Local.Snapshot()
-		return nil, reposOut{Status: src.status(), Count: len(snap.Repos), Repos: snap.Repos}, nil
+		return nil, reposOut{Status: src.status(), Count: len(snap.Repos), Repos: repoRows(snap.Repos)}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -169,7 +196,7 @@ func register(s *mcp.Server, src Source) {
 				risky = append(risky, r)
 			}
 		}
-		return nil, reposOut{Status: src.status(), Count: len(risky), Repos: risky}, nil
+		return nil, reposOut{Status: src.status(), Count: len(risky), Repos: repoRows(risky)}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
