@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,9 +126,41 @@ func TestHerdrDeliveryStopsWhenCancelled(t *testing.T) {
 	if elapsed >= retryEvery {
 		t.Fatalf("delivery ran for %v after cancellation, want well under %v", elapsed, retryEvery)
 	}
-	// The alarm is not lost: an agent that could not be reached falls back to
-	// the desktop.
+	// Shutdown is quiet: the alarm is dropped rather than raised on a desktop
+	// that is going away.
+	if !errors.Is(err, context.Canceled) || channel != "" || notified != 0 {
+		t.Fatalf("channel %q, err %v, %d desktop notifications; want \"\", context.Canceled, 0",
+			channel, err, notified)
+	}
+}
+
+// A named agent that simply cannot be reached still falls back, so the quiet
+// shutdown above is the cancellation and not the failure.
+func TestUnreachableAgentStillFallsBackToTheDesktop(t *testing.T) {
+	defer swapRetryBudget(50*time.Millisecond, 10*time.Millisecond)()
+
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "herdr")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho blocked >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	notified := 0
+	deliver := NewDeliverer(context.Background(), func(urgency, title, body string) error {
+		notified++
+		return nil
+	})
+
+	channel, err := deliver(Trigger{ID: "t1", DeliverTo: "w1:p1"}, Fire{Summary: "s"})
 	if err != nil || channel != "desktop" || notified != 1 {
 		t.Fatalf("channel %q, err %v, %d desktop notifications; want desktop, nil, 1", channel, err, notified)
 	}
+}
+
+// swapRetryBudget shortens the retry window for a test and returns the undo.
+func swapRetryBudget(budget, every time.Duration) func() {
+	oldBudget, oldEvery := blockedRetry, retryEvery
+	blockedRetry, retryEvery = budget, every
+	return func() { blockedRetry, retryEvery = oldBudget, oldEvery }
 }

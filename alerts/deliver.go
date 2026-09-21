@@ -20,13 +20,15 @@ const (
 	TargetRepo = "repo"
 )
 
-// blockedRetry is how long to keep trying an agent that is busy with a dialog,
-// matching Demarchy's behaviour.
-const (
+// blockedRetry is how long to keep trying an agent that is busy with a dialog.
+// Variables rather than constants so a test can shorten the budget instead of
+// spending a real minute proving what happens at the end of it.
+var (
 	blockedRetry = 60 * time.Second
 	retryEvery   = 5 * time.Second
-	herdrTimeout = 15 * time.Second
 )
+
+const herdrTimeout = 15 * time.Second
 
 // Agent is one herdr pane running an agent.
 type Agent struct {
@@ -66,7 +68,9 @@ func Agents(ctx context.Context) ([]Agent, error) {
 type Notifier func(urgency, title, body string) error
 
 // NewDeliverer builds the delivery function the engine calls. ctx is the
-// daemon's run context: cancelling it ends any delivery still retrying.
+// daemon's run context: cancelling it ends any delivery still retrying, and a
+// delivery cut short that way is dropped rather than falling back to a desktop
+// that is going away.
 func NewDeliverer(ctx context.Context, desktop Notifier) Deliverer {
 	return func(t Trigger, f Fire) (string, error) {
 		text := Alarm(t, f)
@@ -77,6 +81,9 @@ func NewDeliverer(ctx context.Context, desktop Notifier) Deliverer {
 		case t.DeliverTo == TargetRepo:
 			agents, err := Agents(ctx)
 			if err != nil {
+				if stopping := ctx.Err(); stopping != nil {
+					return "", stopping
+				}
 				// No herdr means nobody is working anywhere, which is the same
 				// answer as nobody working here.
 				return "desktop", deliverDesktop(desktop, t, f)
@@ -88,11 +95,17 @@ func NewDeliverer(ctx context.Context, desktop Notifier) Deliverer {
 				return "desktop", deliverDesktop(desktop, t, f)
 			}
 			if err := deliverHerdr(ctx, target, text); err != nil {
+				if stopping := ctx.Err(); stopping != nil {
+					return "", stopping
+				}
 				return "desktop", deliverDesktop(desktop, t, f)
 			}
 			return "herdr:" + target, nil
 		default:
 			if err := deliverHerdr(ctx, t.DeliverTo, text); err != nil {
+				if stopping := ctx.Err(); stopping != nil {
+					return "", stopping
+				}
 				// A named agent that cannot be reached falls back rather than
 				// losing the alarm, and the error is recorded either way.
 				if fallback := deliverDesktop(desktop, t, f); fallback != nil {
