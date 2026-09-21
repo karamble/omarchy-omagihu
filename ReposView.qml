@@ -158,6 +158,15 @@ Column {
     view.disclosed = o
   }
 
+  // Opening a row that can answer asks for its statistics; the panel keeps
+  // the answer, so a second opening inside the hour costs nothing.
+  function disclose(e) {
+    var key = view.rowKey(e)
+    var opening = view.disclosed[key] !== true
+    view.toggleDisclosure(key)
+    if (opening && view.hasStats(e)) view.owner.requestStats(view.originOf(e))
+  }
+
   function rowBadges(e) {
     if (e.kind === "header") return view.groupBadges(e.group)
     if (e.repo.prunable) return [{ text: "STALE", tone: Qt.darker(view.foreground, 1.4) }]
@@ -183,71 +192,158 @@ Column {
     return Math.round(secs / 86400) + "d ago"
   }
 
-  // What a disclosed row says, in the order a person acts on it: the facts
-  // and their fix first, then anything that could not be read, then where
-  // the checkout is, how far it stands from its remotes, what is in the
-  // tree, the last commit, and how old this reading is.
-  function detailLines(e) {
+  // ---------- repository statistics ----------
+  //
+  // Asked of the daemon when a row is disclosed, and only for a row that
+  // can answer: an origin on a forge host that one of the accounts speaks
+  // to. A filesystem origin or an unknown host gets no card at all rather
+  // than a failed one. The endpoint cannot see the row, so this is the
+  // view's rule.
+  readonly property var accountHosts: {
+    var out = []
+    var accounts = snap && snap.accounts ? snap.accounts : []
+    for (var i = 0; i < accounts.length; i++) {
+      var id = String(accounts[i].accountId || "")
+      var at = id.lastIndexOf("@")
+      if (at > 0) out.push(id.slice(at + 1).toLowerCase())
+    }
+    return out
+  }
+
+  function originOf(e) {
+    var remotes = (e.kind === "header" ? e.group.remotes : e.repo.remotes) || {}
+    return remotes["origin"] || ""
+  }
+
+  // The host in any of the forms a remote is written in, or "" for a path.
+  function originHost(url) {
+    var m = /^(?:[a-z]+:\/\/)?(?:[^@\/]+@)?([^\/:]+\.[^\/:]+)[:\/]/.exec(String(url))
+    return m ? m[1].toLowerCase() : ""
+  }
+
+  function hasStats(e) {
+    if (e.kind !== "header" && e.repo.prunable) return false
+    var host = view.originHost(view.originOf(e))
+    return host !== "" && view.accountHosts.indexOf(host) >= 0
+  }
+
+  function minutesLeft(iso) {
+    var t = Date.parse(iso)
+    if (isNaN(t)) return 0
+    return Math.max(0, Math.round((t - Date.now()) / 60000))
+  }
+
+  function statsNumbers(st) {
+    return [
+      { value: st.stars || 0, label: "stars" },
+      { value: st.forks || 0, label: "forks" },
+      { value: st.watchers || 0, label: "watchers" },
+      { value: st.openIssues || 0, label: "open issues" },
+      { value: st.openPrs || 0, label: "open PRs" }
+    ]
+  }
+
+  // What the clock says, in the order the states matter.
+  function clockText(answer) {
+    if (answer.paused) return "monitoring is off: these figures cannot update until it is switched back on"
+    if (answer.stale && answer.error) return "figures from " + view.ago(answer.fetchedAt) + "; the refresh failed"
+    if (answer.cached) return "cached for another " + view.minutesLeft(answer.expiresAt) + " minutes"
+    return ""
+  }
+
+  // The state lines of the statistics card, from what the daemon returned.
+  function statsLines(answer) {
+    var out = []
+    var body = Qt.darker(view.foreground, 1.15)
+    var quiet = Qt.darker(view.foreground, 1.4)
+    var st = answer.stats
+    if (st.release) out.push({ text: "release " + st.release + (st.releasedAt ? ", " + view.ago(st.releasedAt) : ""), tone: body })
+    if (st.pushedAt) out.push({ text: "last push " + view.ago(st.pushedAt), tone: quiet })
+    if (st.defaultBranch) out.push({ text: "default branch " + st.defaultBranch, tone: quiet })
+    if (st.license) out.push({ text: "licence " + st.license, tone: quiet })
+    if (st.archived) out.push({ text: "archived", tone: Color.urgent, bold: true })
+    if (st.private) out.push({ text: "private", tone: quiet })
+    if (st.description) out.push({ text: st.description, tone: body })
+    if (answer.stale && answer.error) out.push({ text: "could not refresh: " + answer.error, tone: Color.urgent })
+    return out
+  }
+
+  // What a disclosed row says, as cards in a fixed order so every row reads
+  // the same way: statistics, then the facts and their fix and anything
+  // that could not be read, then where the checkout is and how far it
+  // stands from its remotes, then what is in the tree, the last commit and
+  // how old this reading is.
+  function detailSections(e) {
     var out = []
     var body = Qt.darker(view.foreground, 1.15)
     var quiet = Qt.darker(view.foreground, 1.4)
     var r = e.repo
     var g = e.group
 
+    if (view.hasStats(e)) out.push({ key: "stats", title: "STATISTICS", origin: view.originOf(e), lines: [] })
+
     if (e.kind === "header") {
+      var about = []
       var what = g.checkouts + " checkouts"
       if (g.stale > 0) what += " and " + g.stale + " stale registration" + (g.stale === 1 ? "" : "s")
-      out.push({ text: what + " sharing " + g.key, tone: body })
+      about.push({ text: what + " sharing " + g.key, tone: body })
       for (var m = 0; m < g.members.length; m++) {
         var mem = g.members[m]
         var role = mem.prunable ? "stale" : (mem.main ? "main" : "linked")
-        out.push({ text: role + "  " + mem.name + "  [" + (mem.branch || "?") + "]  " + mem.path, tone: quiet })
+        about.push({ text: role + "  " + mem.name + "  [" + (mem.branch || "?") + "]  " + mem.path, tone: quiet })
       }
       var origin = g.remotes || {}
-      for (var rk in origin) out.push({ text: rk + "  " + origin[rk], tone: quiet })
+      for (var rk in origin) about.push({ text: rk + "  " + origin[rk], tone: quiet })
+      out.push({ key: "repository", title: "REPOSITORY", lines: about })
       return out
     }
 
+    var attention = []
     var drift = view.factsByPath[r.path] || []
     for (var i = 0; i < drift.length; i++) {
-      out.push({ text: drift[i].summary, tone: drift[i].severity === "urgent" ? Color.urgent : Color.accent, bold: true })
-      if (drift[i].detail) out.push({ text: drift[i].detail, tone: body })
+      attention.push({ text: drift[i].summary, tone: drift[i].severity === "urgent" ? Color.urgent : Color.accent, bold: true })
+      if (drift[i].detail) attention.push({ text: drift[i].detail, tone: body })
     }
-    if (r.error) out.push({ text: "could not inspect: " + r.error, tone: Color.urgent, bold: true })
+    if (r.error) attention.push({ text: "could not inspect: " + r.error, tone: Color.urgent, bold: true })
     if (r.prunable) {
-      out.push({ text: "stale registration: " + r.prunable, tone: body })
-      out.push({ text: "git worktree prune clears it", tone: quiet })
+      attention.push({ text: "stale registration: " + r.prunable, tone: body })
+      attention.push({ text: "git worktree prune clears it", tone: quiet })
     }
+    if (attention.length > 0) out.push({ key: "attention", title: "ATTENTION", lines: attention })
 
+    var repository = []
     var where = r.path
     if (view.isMulti(g)) where += r.main ? "  (main checkout of " + g.name + ")" : "  (linked worktree of " + g.name + ")"
-    out.push({ text: where, tone: body })
-    if (r.detached) out.push({ text: "detached HEAD, on no branch", tone: Color.accent })
+    repository.push({ text: where, tone: body })
+    if (r.detached) repository.push({ text: "detached HEAD, on no branch", tone: Color.accent })
     var remotes = r.remotes || {}
     var names = Object.keys(remotes)
-    if (names.length === 0) out.push({ text: "no remote", tone: quiet })
-    for (var n = 0; n < names.length; n++) out.push({ text: names[n] + "  " + remotes[names[n]], tone: quiet })
+    if (names.length === 0) repository.push({ text: "no remote", tone: quiet })
+    for (var n = 0; n < names.length; n++) repository.push({ text: names[n] + "  " + remotes[names[n]], tone: quiet })
+    if (!r.prunable) {
+      if (r.upstream) repository.push({ text: "ahead " + (r.ahead || 0) + ", behind " + (r.behind || 0) + " of " + r.upstream, tone: quiet })
+      else if (r.noUpstream) repository.push({ text: "no upstream: " + (r.unpushed || 0) + " commits exist only here", tone: quiet })
+      // The fork-behind fact above already states this distance.
+      var saidBehind = false
+      for (var b = 0; b < drift.length; b++) if (drift[b].kind === "fork-behind") saidBehind = true
+      if ((r.upstreamBehind || 0) > 0 && !saidBehind) repository.push({ text: r.upstreamBehind + " commits behind upstream/HEAD", tone: quiet })
+    }
+    out.push({ key: "repository", title: "REPOSITORY", lines: repository })
     if (r.prunable) return out
 
-    if (r.upstream) out.push({ text: "ahead " + (r.ahead || 0) + ", behind " + (r.behind || 0) + " of " + r.upstream, tone: quiet })
-    else if (r.noUpstream) out.push({ text: "no upstream: " + (r.unpushed || 0) + " commits exist only here", tone: quiet })
-    // The fork-behind fact above already states this distance.
-    var saidBehind = false
-    for (var b = 0; b < drift.length; b++) if (drift[b].kind === "fork-behind") saidBehind = true
-    if ((r.upstreamBehind || 0) > 0 && !saidBehind) out.push({ text: r.upstreamBehind + " commits behind upstream/HEAD", tone: quiet })
-
+    var state = []
     var work = []
     var counts = [["staged", r.staged], ["modified", r.modified], ["deleted", r.deleted],
                   ["untracked", r.untracked], ["conflicted", r.conflicted], ["stashed", r.stashes]]
     for (var c = 0; c < counts.length; c++) if ((counts[c][1] || 0) > 0) work.push(counts[c][1] + " " + counts[c][0])
-    out.push({ text: work.length > 0 ? work.join(", ") : "working tree clean", tone: quiet })
-
+    state.push({ text: work.length > 0 ? work.join(", ") : "working tree clean", tone: quiet })
     if (r.last && r.last.subject) {
       var who = r.last.author ? "  " + r.last.author : ""
       var when = r.last.at ? ", " + view.ago(r.last.at) : ""
-      out.push({ text: "last commit: " + r.last.subject + who + when, tone: quiet })
+      state.push({ text: "last commit: " + r.last.subject + who + when, tone: quiet })
     }
-    out.push({ text: r.observedAt ? "inspected " + view.ago(r.observedAt) : "not inspected yet", tone: quiet })
+    state.push({ text: r.observedAt ? "inspected " + view.ago(r.observedAt) : "not inspected yet", tone: quiet })
+    out.push({ key: "state", title: "STATE", lines: state })
     return out
   }
 
@@ -379,7 +475,7 @@ Column {
     var e = view.rows[row - 1]
     if (!e) return
     if (action === 0) {
-      view.toggleDisclosure(view.rowKey(e))
+      view.disclose(e)
       return
     }
     if (e.kind === "header") {
@@ -484,23 +580,201 @@ Column {
         onActivated: view.activateRow(index + 1, 0)
         onActionTriggered: view.activateRow(index + 1, 1)
 
-        detailContent: Column {
+        // The cards exist only while the row is disclosed: a collapsed row
+        // costs nothing, however many rows there are.
+        detailContent: Loader {
           width: parent.width
-          spacing: Style.space(3)
+          active: disclosed
+          sourceComponent: Column {
+            width: parent ? parent.width : 0
+            spacing: Style.space(6)
 
-          Repeater {
-            model: view.detailLines(entry)
-            delegate: Text {
-              id: line
-              required property var modelData
-              width: parent.width
-              textFormat: Text.PlainText
-              wrapMode: Text.WrapAnywhere
-              text: line.modelData.text
-              color: line.modelData.tone
-              font.family: view.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: line.modelData.bold === true
+            // One card per section, in the order detailSections gives them.
+            Repeater {
+              model: view.detailSections(entry)
+              delegate: BorderSurface {
+                id: card
+                required property var modelData
+                readonly property bool statsCard: card.modelData.key === "stats"
+                readonly property var answer: statsCard ? view.owner.statsFor(card.modelData.origin) : null
+                readonly property var figures: answer && answer.stats ? answer.stats : null
+                readonly property color body: Qt.darker(view.foreground, 1.15)
+                readonly property color quiet: Qt.darker(view.foreground, 1.4)
+                width: parent.width
+                implicitHeight: cardBody.implicitHeight + Style.space(16)
+                radius: Style.cornerRadius > 0 ? Style.space(6) : 0
+                color: Style.normalFill
+                borderSpec: Border.controlSpec("normal", Qt.darker(view.foreground, 2.5), Color.accent)
+
+                Column {
+                  id: cardBody
+                  anchors.top: parent.top
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.margins: Style.space(8)
+                  spacing: Style.space(3)
+
+                  PanelSectionHeader {
+                    text: card.modelData.title
+                    foreground: card.quiet
+                    fontFamily: view.fontFamily
+                  }
+
+                  // ---- the statistics card: figures, then state, then words
+                  Text {
+                    visible: card.statsCard && !card.figures && (!card.answer || card.answer.loading === true)
+                    textFormat: Text.PlainText
+                    text: "asking GitHub"
+                    color: card.quiet
+                    font.family: view.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    visible: card.statsCard && !card.figures && !!card.answer && card.answer.loading !== true
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    text: card.answer && card.answer.error
+                          ? "GitHub does not show this repository to " + (card.answer.account || "this account")
+                          : "no figures yet"
+                    color: card.body
+                    font.family: view.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    visible: card.statsCard && !card.figures && !!card.answer && card.answer.loading !== true && !!card.answer.error
+                    width: parent.width
+                    wrapMode: Text.WrapAnywhere
+                    textFormat: Text.PlainText
+                    text: card.answer ? String(card.answer.error || "") : ""
+                    color: card.quiet
+                    font.family: view.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Flow {
+                    visible: card.statsCard && !!card.figures
+                    width: parent.width
+                    spacing: Style.space(14)
+
+                    Repeater {
+                      model: card.figures ? view.statsNumbers(card.figures) : []
+                      delegate: Row {
+                        id: figure
+                        required property var modelData
+                        spacing: Style.space(4)
+
+                        Text {
+                          textFormat: Text.PlainText
+                          text: String(figure.modelData.value)
+                          color: view.foreground
+                          font.family: view.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                          font.bold: true
+                        }
+
+                        Text {
+                          anchors.baseline: parent.children[0].baseline
+                          textFormat: Text.PlainText
+                          text: figure.modelData.label
+                          color: card.quiet
+                          font.family: view.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
+                      }
+                    }
+                  }
+
+                  Repeater {
+                    model: card.statsCard && card.figures ? view.statsLines(card.answer) : []
+                    delegate: Text {
+                      id: statsLine
+                      required property var modelData
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      wrapMode: Text.WordWrap
+                      text: statsLine.modelData.text
+                      color: statsLine.modelData.tone
+                      font.family: view.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: statsLine.modelData.bold === true
+                    }
+                  }
+
+                  Flow {
+                    visible: card.statsCard && !!card.figures && (card.figures.topics || []).length > 0
+                    width: parent.width
+                    spacing: Style.space(4)
+
+                    Repeater {
+                      model: card.figures ? (card.figures.topics || []) : []
+                      delegate: Badge {
+                        id: topic
+                        required property var modelData
+                        text: String(topic.modelData)
+                        tone: card.quiet
+                        compact: true
+                        fontFamily: view.fontFamily
+                      }
+                    }
+                  }
+
+                  // ---- every other card: its lines
+                  Repeater {
+                    model: card.modelData.lines
+                    delegate: Text {
+                      id: line
+                      required property var modelData
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      wrapMode: Text.WrapAnywhere
+                      text: line.modelData.text
+                      color: line.modelData.tone
+                      font.family: view.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: line.modelData.bold === true
+                    }
+                  }
+                }
+
+                // The clock says how fresh the figures are, and only when there
+                // is something to say: reused from the cache, held while
+                // monitoring is paused, or kept after a refresh failed.
+                Item {
+                  objectName: "statsClock"
+                  visible: card.statsCard && !!card.answer && card.answer.loading !== true
+                           && (card.answer.cached === true || card.answer.paused === true || card.answer.stale === true)
+                  anchors.top: parent.top
+                  anchors.right: parent.right
+                  anchors.margins: Style.space(6)
+                  width: Style.space(20)
+                  height: Style.space(20)
+
+                  Text {
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: view.owner.iconClock
+                    color: clockMouse.containsMouse ? Color.accent : card.quiet
+                    font.family: view.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: clockMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                  }
+
+                  PanelToolTip {
+                    objectName: "statsClockTip"
+                    visible: clockMouse.containsMouse
+                    text: card.answer ? view.clockText(card.answer) : ""
+                    fontFamily: view.fontFamily
+                  }
+                }
+              }
             }
           }
         }

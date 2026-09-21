@@ -588,6 +588,75 @@ Panel {
     }
   }
 
+  // ---- repository statistics, asked for when a row is disclosed
+  //
+  // One answer per origin, exactly as the helper printed it, so a second
+  // disclosure inside the daemon's hour is instant and never shows a
+  // flicker. A missing entry means nothing has been asked yet; an entry
+  // with loading set means the helper is out asking.
+  property var repoStats: ({})
+  property var statsQueue: []
+
+  function statsFor(origin) {
+    var entry = root.repoStats[origin]
+    return entry === undefined ? null : entry
+  }
+
+  function rememberStats(origin, entry) {
+    var next = ({})
+    for (var k in root.repoStats) next[k] = root.repoStats[k]
+    next[origin] = entry
+    root.repoStats = next
+  }
+
+  // requestStats asks unless an answer is still inside its window. A failed
+  // answer is asked again on the next disclosure, since the daemon may have
+  // recovered.
+  function requestStats(origin) {
+    if (!origin) return
+    var have = root.statsFor(origin)
+    if (have && have.loading) return
+    if (have && !have.error && have.expiresAt && Date.parse(have.expiresAt) > Date.now()) return
+    root.rememberStats(origin, { loading: true, stats: have && have.stats ? have.stats : null })
+    if (statsProc.running) { root.statsQueue = root.statsQueue.concat([origin]); return }
+    statsProc.origin = origin
+    statsProc.running = true
+  }
+
+  Process {
+    id: statsProc
+    clearEnvironment: true
+    environment: root.childEnv
+    property string origin: ""
+    command: [root.helperPath, "stats", statsProc.origin, "--addr", root.addr]
+
+    onExited: function(code, status) {
+      var asked = statsProc.origin
+      var have = root.statsFor(asked)
+      // A helper that printed nothing failed before it reached the daemon.
+      if (have && have.loading) root.rememberStats(asked, { error: "could not ask the daemon", stats: have.stats })
+      if (root.statsQueue.length > 0) {
+        var next = root.statsQueue[0]
+        root.statsQueue = root.statsQueue.slice(1)
+        statsProc.origin = next
+        statsProc.running = true
+      }
+    }
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = String(text || "")
+        if (raw.trim() === "") return
+        try {
+          root.rememberStats(statsProc.origin, JSON.parse(raw))
+        } catch (e) {
+          root.rememberStats(statsProc.origin, { error: "unreadable helper output" })
+        }
+      }
+    }
+  }
+
   Process {
     id: controlProc
     clearEnvironment: true
