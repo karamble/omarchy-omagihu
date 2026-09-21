@@ -115,7 +115,7 @@ func Catalogue() []Leaf {
 		{Path: "repos", Kind: KindList, Operators: listOps,
 			Describes: "watched local checkouts",
 			Fields: []string{"name", "path", "branch", "upstream", "operation",
-				"unpushed", "behind", "upstreamBehind", "staged", "modified", "untracked", "conflicted"},
+				"unpushed", "behind", "upstreamBehind", "staged", "modified", "untracked", "conflicted", "stashes"},
 			Identity:   []string{"path"},
 			TimeFields: []string{"observedAt"}},
 	}
@@ -241,7 +241,7 @@ func (s Snapshot) List(path string) ([]map[string]any, bool) {
 				"unpushed": r.Unpushed, "behind": r.Behind,
 				"upstreamBehind": r.UpstreamBehind, "staged": r.Staged,
 				"modified": r.Modified, "untracked": r.Untracked,
-				"conflicted": r.Conflicted, "observedAt": r.ObservedAt,
+				"conflicted": r.Conflicted, "stashes": r.Stashes, "observedAt": r.ObservedAt,
 			})
 		}
 		return out, true

@@ -1,12 +1,14 @@
 package alerts
 
 import (
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/karamble/omarchy-omagihu/attention"
 	"github.com/karamble/omarchy-omagihu/correlate"
 	"github.com/karamble/omarchy-omagihu/forge"
+	"github.com/karamble/omarchy-omagihu/local"
 )
 
 func ptr(f float64) *float64 { return &f }
@@ -416,6 +418,57 @@ func TestEveryCataloguePathResolves(t *testing.T) {
 		}
 		if !ok {
 			t.Errorf("catalogue path %q does not resolve against a snapshot", leaf.Path)
+		}
+	}
+}
+
+// TestReposExposeStashes pins stashes on the alert surface: the catalogue
+// names it, so a where clause is accepted, and every sampled entry carries
+// it, so the clause has something to match.
+func TestReposExposeStashes(t *testing.T) {
+	i := slices.IndexFunc(Catalogue(), func(l Leaf) bool { return l.Path == "repos" })
+	if i < 0 {
+		t.Fatal("the catalogue has no repos list")
+	}
+	if !slices.Contains(Catalogue()[i].Fields, "stashes") {
+		t.Error("repos does not list stashes as a field")
+	}
+
+	entries, ok := Snapshot{Repos: []local.Repo{{Path: "/a", Stashes: 2}}}.List("repos")
+	if !ok || len(entries) != 1 {
+		t.Fatalf("List(repos) = %v, %v", entries, ok)
+	}
+	if got := entries[0]["stashes"]; got != 2 {
+		t.Errorf("sampled stashes = %v, want 2", got)
+	}
+}
+
+// TestListFieldsAreSampled guards the two places a list field lives: a field
+// the catalogue names but the sampler leaves out is accepted at arm time and
+// then never matches anything.
+func TestListFieldsAreSampled(t *testing.T) {
+	snap := Snapshot{
+		Inbox:    []forge.Notification{{}},
+		Reviews:  []forge.PullRequest{{}},
+		Authored: []forge.PullRequest{{}},
+		Merged:   []forge.PullRequest{{}},
+		Issues:   []forge.Issue{{}},
+		Facts:    []correlate.Fact{{}},
+		Repos:    []local.Repo{{}},
+	}
+	for _, leaf := range Catalogue() {
+		if leaf.Kind != KindList {
+			continue
+		}
+		entries, ok := snap.List(leaf.Path)
+		if !ok || len(entries) != 1 {
+			t.Errorf("%s: sampled %d entries from a snapshot holding one", leaf.Path, len(entries))
+			continue
+		}
+		for _, field := range slices.Concat(leaf.Fields, leaf.TimeFields, leaf.Identity) {
+			if _, present := entries[0][field]; !present {
+				t.Errorf("%s names %q but the sampler does not set it", leaf.Path, field)
+			}
 		}
 	}
 }
