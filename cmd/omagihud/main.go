@@ -133,7 +133,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	engine := alerts.NewEngine(triggers, apiServer.AlertSample, store.MonitoringEnabled,
-		alerts.NewDeliverer(notify.Desktop), logger)
+		alerts.NewDeliverer(ctx, notify.Desktop), logger)
 	apiServer.SetEngine(engine)
 	logger.Info("alerts loaded", "armed", len(triggers.Triggers), "store", triggers.Path())
 

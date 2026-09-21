@@ -65,8 +65,9 @@ func Agents(ctx context.Context) ([]Agent, error) {
 // that already knows how.
 type Notifier func(urgency, title, body string) error
 
-// NewDeliverer builds the delivery function the engine calls.
-func NewDeliverer(desktop Notifier) Deliverer {
+// NewDeliverer builds the delivery function the engine calls. ctx is the
+// daemon's run context: cancelling it ends any delivery still retrying.
+func NewDeliverer(ctx context.Context, desktop Notifier) Deliverer {
 	return func(t Trigger, f Fire) (string, error) {
 		text := Alarm(t, f)
 
@@ -74,7 +75,7 @@ func NewDeliverer(desktop Notifier) Deliverer {
 		case t.DeliverTo == TargetYou || t.DeliverTo == "":
 			return "desktop", deliverDesktop(desktop, t, f)
 		case t.DeliverTo == TargetRepo:
-			agents, err := Agents(context.Background())
+			agents, err := Agents(ctx)
 			if err != nil {
 				// No herdr means nobody is working anywhere, which is the same
 				// answer as nobody working here.
@@ -86,12 +87,12 @@ func NewDeliverer(desktop Notifier) Deliverer {
 				// dropping the alarm.
 				return "desktop", deliverDesktop(desktop, t, f)
 			}
-			if err := deliverHerdr(context.Background(), target, text); err != nil {
+			if err := deliverHerdr(ctx, target, text); err != nil {
 				return "desktop", deliverDesktop(desktop, t, f)
 			}
 			return "herdr:" + target, nil
 		default:
-			if err := deliverHerdr(context.Background(), t.DeliverTo, text); err != nil {
+			if err := deliverHerdr(ctx, t.DeliverTo, text); err != nil {
 				// A named agent that cannot be reached falls back rather than
 				// losing the alarm, and the error is recorded either way.
 				if fallback := deliverDesktop(desktop, t, f); fallback != nil {

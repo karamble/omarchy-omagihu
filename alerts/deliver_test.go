@@ -1,6 +1,9 @@
 package alerts
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -92,5 +95,39 @@ func TestAlarmEscapesNewlinesInSummary(t *testing.T) {
 	)
 	if strings.Contains(got, "\n") {
 		t.Fatalf("a newline from the summary survived into the prompt: %q", got)
+	}
+}
+
+// TestHerdrDeliveryStopsWhenCancelled runs a delivery against a herdr that
+// always refuses, cancels the context it was built with, and expects the
+// retry loop to end there rather than after the full blockedRetry.
+func TestHerdrDeliveryStopsWhenCancelled(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "herdr")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho blocked >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	notified := 0
+	deliver := NewDeliverer(ctx, func(urgency, title, body string) error {
+		notified++
+		return nil
+	})
+
+	time.AfterFunc(200*time.Millisecond, cancel)
+	start := time.Now()
+	channel, err := deliver(Trigger{ID: "t1", DeliverTo: "w1:p1"}, Fire{Summary: "s"})
+	elapsed := time.Since(start)
+
+	if elapsed >= retryEvery {
+		t.Fatalf("delivery ran for %v after cancellation, want well under %v", elapsed, retryEvery)
+	}
+	// The alarm is not lost: an agent that could not be reached falls back to
+	// the desktop.
+	if err != nil || channel != "desktop" || notified != 1 {
+		t.Fatalf("channel %q, err %v, %d desktop notifications; want desktop, nil, 1", channel, err, notified)
 	}
 }
