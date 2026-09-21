@@ -145,3 +145,37 @@ func TestHealthErrorsIsAnEmptyListWhenHealthy(t *testing.T) {
 		}
 	}
 }
+
+// TestHealthCountsCheckoutsAndRepositories pins the two local numbers in the
+// health document: repos counts the checkouts being watched, so a prunable
+// worktree registration is listed but not counted, and reposAtRisk counts
+// repositories, so a group with two at-risk checkouts is one and a checkout
+// that is merely dirty is none.
+func TestHealthCountsCheckoutsAndRepositories(t *testing.T) {
+	repos := &local.Snapshot{Repos: []local.Repo{
+		{Path: "/thing", Name: "thing", Group: "/thing/.git", Main: true, Modified: 1},
+		{Path: "/wt-a", Name: "wt-a", Group: "/thing/.git", Unpushed: 1},
+		{Path: "/wt-b", Name: "wt-b", Group: "/thing/.git", Unpushed: 1},
+		{Path: "/wt-gone", Name: "wt-gone", Group: "/thing/.git",
+			Prunable: "gitdir file points to non-existent location"},
+	}}
+	remote := &poll.Snapshot{}
+	s := NewServer(&accounts.Store{}, fixedPoller{remote}, fixedWatcher{repos},
+		slog.New(slog.DiscardHandler), "test")
+
+	h := s.health(remote, repos)
+	if h.Repos != 3 {
+		t.Errorf("Repos = %d, want 3: a prunable registration is not a checkout", h.Repos)
+	}
+	if h.ReposRisk != 1 {
+		t.Errorf("ReposRisk = %d, want 1: two at-risk checkouts of one repository count once", h.ReposRisk)
+	}
+
+	// A repository that is only dirty adds nothing at the health level either.
+	dirty := &local.Snapshot{Repos: []local.Repo{
+		{Path: "/other", Name: "other", Group: "/other/.git", Main: true, Modified: 2, Untracked: 1},
+	}}
+	if h := s.health(remote, dirty); h.Repos != 1 || h.ReposRisk != 0 {
+		t.Errorf("dirty-only: Repos = %d ReposRisk = %d, want 1 and 0", h.Repos, h.ReposRisk)
+	}
+}
