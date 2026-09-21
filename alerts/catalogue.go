@@ -104,8 +104,8 @@ func Catalogue() []Leaf {
 			Describes: "your recently merged pull requests",
 			Fields:    prFields, Identity: prIdentity, TimeFields: prTimes},
 		{Path: "work.assignedIssues", Kind: KindList, Operators: listOps,
-			Describes:  "issues assigned to you",
-			Fields:     []string{"repo", "number", "title"},
+			Describes:  "issues waiting on you: assigned to you, or opened by somebody else on a repository you own (incoming)",
+			Fields:     []string{"repo", "number", "title", "author", "incoming"},
 			Identity:   []string{"repo", "number"},
 			TimeFields: []string{"updatedAt"}},
 		{Path: "facts", Kind: KindList, Operators: listOpsNoAge,
@@ -220,6 +220,7 @@ func (s Snapshot) List(path string) ([]map[string]any, bool) {
 		for _, i := range s.Issues {
 			out = append(out, map[string]any{
 				"repo": i.Repo, "number": i.Number, "title": i.Title,
+				"author": i.Author, "incoming": i.Incoming,
 				"updatedAt": i.UpdatedAt, "url": i.URL,
 			})
 		}

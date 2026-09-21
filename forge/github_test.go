@@ -684,7 +684,8 @@ func TestWorkDiscardsUnattributableErrors(t *testing.T) {
 		w.Write([]byte(`{"data":{
 			"viewer":{"login":"tester"},
 			"authored":{"nodes":[]},"reviewing":{"nodes":[]},"incoming":{"nodes":[]},
-			"merged":{"nodes":[]},"assigned":{"nodes":[]},"authoredIssues":{"nodes":[]}
+			"merged":{"nodes":[]},"assigned":{"nodes":[]},"authoredIssues":{"nodes":[]},
+			"incomingIssues":{"nodes":[]}
 		},"errors":[{"message":"something went wrong while executing your query"}]}`))
 	}))
 	defer srv.Close()
@@ -717,6 +718,7 @@ func TestUnresolvedLists(t *testing.T) {
 		{"no errors, every field present", whole, nil, nil, true},
 		{"a nulled field with no path", withNull, []gqlError{{Message: "x"}}, []string{"mergedPrs"}, true},
 		{"a path into a present field", whole, []gqlError{{Path: []any{"incoming", "nodes", 3.0}}}, []string{"reviewRequests"}, true},
+		{"a path into the incoming issues", whole, []gqlError{{Path: []any{"incomingIssues"}}}, []string{"assignedIssues"}, true},
 		{"a path nobody asked for", whole, []gqlError{{Path: []any{"weeks"}}}, nil, false},
 		{"no path and nothing nulled", whole, []gqlError{{Message: "x"}}, nil, false},
 	} {
@@ -757,5 +759,99 @@ func TestNextLinkStaysOnTheSameHost(t *testing.T) {
 				t.Errorf("nextLink(%q) = %q, want %q", tc.header, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestWorkSurfacesIncomingIssues covers the issue counterpart of the incoming
+// pull request: somebody else's issue on a repository you own. Assigning
+// needs triage permission, so it can never arrive through assignee:@me.
+func TestWorkSurfacesIncomingIssues(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":{
+			"viewer":{"login":"tester"},
+			"authored":{"nodes":[]},"reviewing":{"nodes":[]},"incoming":{"nodes":[]},"merged":{"nodes":[]},
+			"assigned":{"nodes":[{
+				"number":31,"title":"triaged to you","url":"https://github.com/o/r/issues/31",
+				"updatedAt":"2026-09-06T00:00:00Z","author":{"login":"colleague"},
+				"repository":{"nameWithOwner":"o/r"}
+			}]},
+			"authoredIssues":{"nodes":[{
+				"number":44,"title":"yours","url":"https://github.com/o/r/issues/44",
+				"updatedAt":"2026-09-06T00:00:00Z","author":{"login":"tester"},
+				"repository":{"nameWithOwner":"o/r"}
+			}]},
+			"incomingIssues":{"nodes":[
+			  {"number":31,"title":"triaged to you","url":"https://github.com/o/r/issues/31",
+			   "updatedAt":"2026-09-06T00:00:00Z","author":{"login":"colleague"},
+			   "repository":{"nameWithOwner":"o/r"}},
+			  {"number":5,"title":"setup fails on first install","url":"https://github.com/o/r/issues/5",
+			   "updatedAt":"2026-09-07T00:00:00Z","author":{"login":"stranger"},
+			   "repository":{"nameWithOwner":"o/r"},
+			   "labels":{"nodes":[{"name":"bug","color":"d73a4a"}]}}
+			]}
+		}}`))
+	}))
+	defer srv.Close()
+
+	work, _, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+	if err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+
+	// 31 is in both searches and is listed once, as assigned: somebody
+	// triaged it, which is the more specific state. 5 arrives only through
+	// the new search and is marked incoming, with its reporter.
+	if len(work.AssignedIssues) != 2 {
+		t.Fatalf("AssignedIssues = %+v, want 31 then 5", work.AssignedIssues)
+	}
+	triaged, reported := work.AssignedIssues[0], work.AssignedIssues[1]
+	if triaged.Number != 31 || triaged.Incoming || triaged.Author != "colleague" {
+		t.Errorf("assigned issue = %+v, want 31, not incoming, by colleague", triaged)
+	}
+	if reported.Number != 5 || !reported.Incoming || reported.Author != "stranger" || len(reported.Labels) != 1 {
+		t.Errorf("incoming issue = %+v, want 5, incoming, by stranger, with its label", reported)
+	}
+
+	// The issue you opened lives in its own list and nowhere else.
+	if len(work.AuthoredIssues) != 1 || work.AuthoredIssues[0].Number != 44 {
+		t.Errorf("AuthoredIssues = %+v, want only 44", work.AuthoredIssues)
+	}
+	for _, is := range work.AssignedIssues {
+		if is.Number == 44 {
+			t.Error("an issue you authored is also listed as waiting on you")
+		}
+	}
+}
+
+// TestWorkIncomingIssuesFailureLeavesAssignedUnresolved pins the seventh
+// search into the partial-answer path: when it is nulled, the list it feeds
+// is reported unresolved, so the poller keeps the previous value rather than
+// replacing it with the half it did get.
+func TestWorkIncomingIssuesFailureLeavesAssignedUnresolved(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":{
+			"viewer":{"login":"tester"},
+			"authored":{"nodes":[]},"reviewing":{"nodes":[]},"incoming":{"nodes":[]},"merged":{"nodes":[]},
+			"assigned":{"nodes":[{
+				"number":31,"title":"triaged to you","url":"https://github.com/o/r/issues/31",
+				"author":{"login":"colleague"},"repository":{"nameWithOwner":"o/r"}
+			}]},
+			"authoredIssues":{"nodes":[]},
+			"incomingIssues":null
+		},"errors":[{"type":"FORBIDDEN","message":"Resource not accessible","path":["incomingIssues"]}]}`))
+	}))
+	defer srv.Close()
+
+	work, _, err := testClient(t, srv).workAt(t.Context(), srv.URL)
+	if err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if !slices.Equal(work.Unresolved, []string{"assignedIssues"}) || work.Resolved("assignedIssues") {
+		t.Errorf("Unresolved = %v, want assignedIssues alone: half a list is not a list", work.Unresolved)
+	}
+	if len(work.Warnings) != 1 {
+		t.Errorf("Warnings = %v, want the one error", work.Warnings)
 	}
 }

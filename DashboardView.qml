@@ -12,7 +12,7 @@ Column {
   required property var owner
   property var snap: null
 
-  // "all", "reviews", "broken", "inbox"
+  // "all", "reviews", "broken", "inbox", "reconcile", "issues"
   property string filter: "all"
 
   readonly property color foreground: owner.foreground
@@ -22,6 +22,14 @@ Column {
   readonly property var reviews: work && work.reviewRequests ? work.reviewRequests : []
   readonly property var authored: work && work.authoredPrs ? work.authoredPrs : []
   readonly property var issues: work && work.assignedIssues ? work.assignedIssues : []
+  // Issues somebody else opened on a repository you own. They share the
+  // assigned list, marked incoming, because nobody could assign them to you.
+  readonly property var incoming: {
+    var out = []
+    for (var i = 0; i < view.issues.length; i++) if (view.issues[i].incoming) out.push(view.issues[i])
+    return out
+  }
+  readonly property int assignedCount: view.issues.length - view.incoming.length
   // Issues you opened. Their labels are where a submission's state lives, which
   // is invisible from the notification alone.
   readonly property var allOpened: work && work.authoredIssues ? work.authoredIssues : []
@@ -58,10 +66,11 @@ Column {
   }
 
   readonly property bool showReviews: (filter === "all" || filter === "reviews") && reviews.length > 0
+  readonly property bool showIncoming: (filter === "all" || filter === "issues") && incoming.length > 0
   readonly property bool showBroken: (filter === "all" || filter === "broken") && brokenPrs.length > 0
   readonly property bool showInbox: (filter === "all" || filter === "inbox") && inbox.length > 0
   readonly property bool showFacts: (filter === "all" || filter === "reconcile") && facts.length > 0
-  readonly property bool showOpened: (filter === "all" || filter === "opened") && opened.length > 0
+  readonly property bool showOpened: (filter === "all" || filter === "issues") && opened.length > 0
 
   spacing: Style.space(10)
 
@@ -162,16 +171,17 @@ Column {
   // the order the sections draw them; then the button at the foot. Each entry
   // carries one action, which is to open it on GitHub.
   readonly property var filters: [
-    { key: "all", label: "Everything", count: view.reviews.length + view.brokenPrs.length + view.inbox.length, urgent: false },
+    { key: "all", label: "Everything", count: view.reviews.length + view.incoming.length + view.brokenPrs.length + view.inbox.length, urgent: false },
     { key: "reviews", label: "Reviews", count: view.reviews.length, urgent: view.reviews.length > 0 },
     { key: "broken", label: "Needs fixing", count: view.brokenPrs.length, urgent: view.brokenPrs.length > 0 },
     { key: "inbox", label: "Inbox", count: view.inbox.length, urgent: false },
     { key: "reconcile", label: "Reconcile", count: view.facts.length, urgent: view.urgentFacts > 0 },
-    { key: "opened", label: "Opened", count: view.opened.length, urgent: false }
+    { key: "issues", label: "Issues", count: view.incoming.length + view.opened.length, urgent: view.incoming.length > 0 }
   ]
 
   readonly property int reviewOffset: 1
-  readonly property int brokenOffset: view.reviewOffset + (view.showReviews ? view.reviews.length : 0)
+  readonly property int incomingOffset: view.reviewOffset + (view.showReviews ? view.reviews.length : 0)
+  readonly property int brokenOffset: view.incomingOffset + (view.showIncoming ? view.incoming.length : 0)
   readonly property int factOffset: view.brokenOffset + (view.showBroken ? view.brokenPrs.length : 0)
   readonly property int inboxOffset: view.factOffset + (view.showFacts ? view.facts.length : 0)
   readonly property int openedOffset: view.inboxOffset + (view.showInbox ? view.inbox.length : 0)
@@ -190,8 +200,10 @@ Column {
     if (row === view.moreRow) { view.owner.setView("repos"); return }
 
     var url = ""
-    if (view.showReviews && row < view.brokenOffset)
+    if (view.showReviews && row < view.incomingOffset)
       url = view.reviews[row - view.reviewOffset].url
+    else if (view.showIncoming && row < view.brokenOffset)
+      url = view.incoming[row - view.incomingOffset].url
     else if (view.showBroken && row < view.factOffset)
       url = view.brokenPrs[row - view.brokenOffset].url
     else if (view.showFacts && row < view.inboxOffset)
@@ -255,6 +267,30 @@ Column {
         subtitle: "by " + modelData.author + " • " + view.ago(modelData.updatedAt)
         // Both wait on the same person, but only one of them was asked for.
         badges: [{ text: modelData.incoming ? "ON YOURS" : "REVIEW", tone: Color.urgent, loud: true }]
+        onActivated: view.owner.openUrl(modelData.url)
+      }
+    }
+
+    // ----- issues reported on your repositories -----
+    PanelSectionHeader {
+      visible: view.showIncoming
+      text: "REPORTED ON YOUR REPOSITORIES"
+      foreground: Color.urgent
+      fontFamily: view.fontFamily
+    }
+
+    Repeater {
+      model: view.showIncoming ? view.incoming : []
+      delegate: ListRow {
+        hasCursor: view.owner.cursor === view.incomingOffset + index
+        width: listColumn.width
+        icon: view.owner.iconDot
+        tone: Color.urgent
+        urgent: true
+        fontFamily: view.fontFamily
+        title: view.shortRepo(modelData.repo) + " #" + modelData.number + "  " + modelData.title
+        subtitle: "by " + modelData.author + " • " + view.ago(modelData.updatedAt)
+        badges: [{ text: "ON YOURS", tone: Color.urgent, loud: true }].concat(view.labelBadges(modelData))
         onActivated: view.owner.openUrl(modelData.url)
       }
     }
@@ -361,8 +397,8 @@ Column {
 
     // ----- nothing matches -----
     Rectangle {
-      visible: !view.showReviews && !view.showBroken && !view.showInbox
-               && !view.showFacts && !view.showOpened
+      visible: !view.showReviews && !view.showIncoming && !view.showBroken
+               && !view.showInbox && !view.showFacts && !view.showOpened
       width: listColumn.width
       implicitHeight: Style.space(70)
       radius: Style.cornerRadius > 0 ? Style.space(6) : 0
@@ -406,7 +442,7 @@ Column {
     Text {
       Layout.fillWidth: true
       textFormat: Text.PlainText
-      text: view.authored.length + " open PRs • " + view.issues.length + " issues assigned"
+      text: view.authored.length + " open PRs • " + view.assignedCount + " issues assigned"
       color: Qt.darker(view.foreground, 1.3)
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption

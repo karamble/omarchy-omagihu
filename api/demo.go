@@ -137,6 +137,16 @@ func Demo() any {
 			URL:       "https://github.com/octosmith/tidewatch/issues/77",
 			UpdatedAt: ago(26 * time.Hour),
 		},
+		// Reported by somebody else on a repository you own. Nobody could
+		// assign it to you, so it arrives marked incoming.
+		{
+			AccountID: "demo", Repo: "octosmith/harbourmaster", Number: 51,
+			Title:  "First install fails when the config directory is missing",
+			URL:    "https://github.com/octosmith/harbourmaster/issues/51",
+			Author: "driftwood", Incoming: true,
+			Labels:    []forge.Label{{Name: "bug", Color: "d73a4a"}},
+			UpdatedAt: ago(50 * time.Minute),
+		},
 	}
 
 	// harbourmaster is one repository with three registered worktrees: the

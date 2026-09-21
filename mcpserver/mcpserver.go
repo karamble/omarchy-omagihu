@@ -131,7 +131,9 @@ func register(s *mcp.Server, src Source) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "omagihu_work",
 		Description: "Open pull requests you authored, pull requests awaiting your review, " +
-			"and issues assigned to you. Pull requests carry their CI rollup and review decision.",
+			"and issues waiting on you: assigned to you, or opened by somebody else on a " +
+			"repository you own, marked incoming. Pull requests carry their CI rollup and " +
+			"review decision.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, workOut, error) {
 		authored, reviews, issues, opened := mergedWork(src)
 		return nil, workOut{

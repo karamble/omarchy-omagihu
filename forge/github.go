@@ -394,15 +394,21 @@ type Label struct {
 	Color string `json:"color"`
 }
 
-// Issue is one issue the account is assigned to or opened.
+// Issue is one issue the account is assigned to, opened, or was handed by
+// somebody else on a repository it owns.
 type Issue struct {
 	AccountID string    `json:"accountId"`
 	Repo      string    `json:"repo"`
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
 	URL       string    `json:"url"`
+	Author    string    `json:"author,omitempty"`
 	Labels    []Label   `json:"labels,omitempty"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
+	// Incoming marks an issue somebody else opened on a repository the
+	// account owns. Assigning needs triage permission, so a reporter cannot
+	// put themselves on your radar; this is how they get there.
+	Incoming bool `json:"incoming,omitempty"`
 }
 
 // Workload is everything the account currently owes or is owed.
@@ -410,7 +416,9 @@ type Workload struct {
 	Login          string        `json:"login"`
 	AuthoredPRs    []PullRequest `json:"authoredPrs"`
 	ReviewRequests []PullRequest `json:"reviewRequests"`
-	AssignedIssues []Issue       `json:"assignedIssues"`
+	// AssignedIssues are the issues waiting on you: assigned to you, or
+	// opened by somebody else on a repository you own, marked Incoming.
+	AssignedIssues []Issue `json:"assignedIssues"`
 	// AuthoredIssues are the issues you opened. A submission under review, a
 	// bug you filed upstream: the labels on them are where their state lives.
 	AuthoredIssues []Issue `json:"authoredIssues"`
@@ -453,10 +461,14 @@ query {
   authoredIssues: search(query: "is:open is:issue author:@me archived:false", type: ISSUE, first: 50) {
     nodes { ...issueFields }
   }
+  incomingIssues: search(query: "is:open is:issue user:@me -author:@me archived:false", type: ISSUE, first: 50) {
+    nodes { ...issueFields }
+  }
 }
 
 fragment issueFields on Issue {
   number title url updatedAt
+  author { login }
   repository { nameWithOwner }
   labels(first: 10) { nodes { name color } }
 }
@@ -588,8 +600,25 @@ func (c *Client) workAt(ctx context.Context, endpoint string) (Workload, Rate, e
 	for _, n := range data.Merged.Nodes {
 		work.MergedPRs = append(work.MergedPRs, c.toPR(n))
 	}
+	seenIssue := make(map[string]struct{})
 	for _, n := range data.Assigned.Nodes {
-		work.AssignedIssues = append(work.AssignedIssues, c.toIssue(n))
+		issue := c.toIssue(n)
+		seenIssue[issue.URL] = struct{}{}
+		work.AssignedIssues = append(work.AssignedIssues, issue)
+	}
+	// Somebody else's issue on a repository you own. Assigning needs triage
+	// permission, so a reporter cannot appear through assignee:@me any more
+	// than a contributor can through review-requested:@me. An issue already
+	// assigned to you is listed as that: somebody triaged it, which is the
+	// more specific state.
+	for _, n := range data.IncomingIssues.Nodes {
+		issue := c.toIssue(n)
+		if _, already := seenIssue[issue.URL]; already {
+			continue
+		}
+		issue.Incoming = true
+		seenIssue[issue.URL] = struct{}{}
+		work.AssignedIssues = append(work.AssignedIssues, issue)
 	}
 	for _, n := range data.AuthoredIssues.Nodes {
 		work.AuthoredIssues = append(work.AuthoredIssues, c.toIssue(n))
@@ -608,6 +637,7 @@ type gqlWorkload struct {
 	Merged         struct{ Nodes []gqlPR }    `json:"merged"`
 	Assigned       struct{ Nodes []gqlIssue } `json:"assigned"`
 	AuthoredIssues struct{ Nodes []gqlIssue } `json:"authoredIssues"`
+	IncomingIssues struct{ Nodes []gqlIssue } `json:"incomingIssues"`
 }
 
 // gqlError is one entry of a GraphQL errors array. Type is how GitHub says
@@ -625,7 +655,8 @@ func hasData(raw json.RawMessage) bool {
 }
 
 // workloadLists maps each top-level field of the query to the Workload list
-// it feeds, by JSON name. reviewing and incoming both feed reviewRequests.
+// it feeds, by JSON name. reviewing and incoming both feed reviewRequests;
+// assigned and incomingIssues both feed assignedIssues.
 var workloadLists = map[string]string{
 	"viewer":         "login",
 	"authored":       "authoredPrs",
@@ -634,6 +665,7 @@ var workloadLists = map[string]string{
 	"merged":         "mergedPrs",
 	"assigned":       "assignedIssues",
 	"authoredIssues": "authoredIssues",
+	"incomingIssues": "assignedIssues",
 }
 
 // unresolvedLists names the lists the answer did not deliver: a top-level
@@ -697,10 +729,13 @@ func classifyGraphQL(op string, errs []gqlError, h http.Header) *APIError {
 // gqlIssue is the issueFields fragment as it comes back, shared by both issue
 // searches so the two cannot decode differently.
 type gqlIssue struct {
-	Number     int       `json:"number"`
-	Title      string    `json:"title"`
-	URL        string    `json:"url"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	URL       string    `json:"url"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	Author    struct {
+		Login string `json:"login"`
+	} `json:"author"`
 	Repository struct {
 		NameWithOwner string `json:"nameWithOwner"`
 	} `json:"repository"`
@@ -717,6 +752,7 @@ func (c *Client) toIssue(n gqlIssue) Issue {
 		Number:    n.Number,
 		Title:     n.Title,
 		URL:       n.URL,
+		Author:    n.Author.Login,
 		Labels:    n.Labels.Nodes,
 		UpdatedAt: n.UpdatedAt,
 	}

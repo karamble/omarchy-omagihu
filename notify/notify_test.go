@@ -191,7 +191,7 @@ func TestInterruptedOperationAnnounced(t *testing.T) {
 }
 
 func TestParseDomain(t *testing.T) {
-	for _, name := range []string{"reviews", "broken", "inbox", "local"} {
+	for _, name := range []string{"reviews", "incoming", "reported", "broken", "inbox", "local", "reconcile"} {
 		if _, ok := ParseDomain(name); !ok {
 			t.Errorf("ParseDomain(%q) rejected a real domain", name)
 		}
@@ -203,7 +203,7 @@ func TestParseDomain(t *testing.T) {
 
 func TestPrefsSetAndEnabled(t *testing.T) {
 	p := Prefs{}
-	for _, d := range []Domain{DomainReviews, DomainBroken, DomainInbox, DomainLocal} {
+	for _, d := range []Domain{DomainReviews, DomainIncoming, DomainReported, DomainBroken, DomainInbox, DomainLocal, DomainReconcile} {
 		if p.Enabled(d) {
 			t.Errorf("zero Prefs has %s enabled", d)
 		}
@@ -399,6 +399,74 @@ func TestIncomingHasItsOwnSwitch(t *testing.T) {
 		{"incoming off silences an arrival", Prefs{Reviews: true, Incoming: false}, withIncoming, 0},
 		{"reviews off, an arrival still speaks", Prefs{Reviews: false, Incoming: true}, withIncoming, 1},
 		{"reviews off silences a request", Prefs{Reviews: false, Incoming: true}, withReview, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, remote, _, out := harness(t, tc.prefs)
+			remote.snap = tc.snap("https://example/first")
+			n.check() // prime
+			remote.snap = tc.snap("https://example/second")
+			n.check()
+			if len(*out) != tc.want {
+				t.Fatalf("sent %d notifications, want %d", len(*out), tc.want)
+			}
+		})
+	}
+}
+
+// withReported is an issue somebody else opened on a repository you own.
+func withReported(url string) *poll.Snapshot {
+	return &poll.Snapshot{Accounts: []poll.AccountView{{
+		AccountID: "a",
+		AssignedIssues: []forge.Issue{{Repo: "o/r", Number: 5, URL: url,
+			Title: "setup fails on first install", Author: "stranger", Incoming: true}},
+	}}}
+}
+
+// withAssigned is an issue somebody triaged to you, which GitHub already
+// announced through the inbox.
+func withAssigned(url string) *poll.Snapshot {
+	return &poll.Snapshot{Accounts: []poll.AccountView{{
+		AccountID:      "a",
+		AssignedIssues: []forge.Issue{{Repo: "o/r", Number: 31, URL: url, Title: "triaged", Author: "colleague"}},
+	}}}
+}
+
+// TestReportedIssueIsAnnounced pins the wording and the default: an issue a
+// stranger opened on your repository is news, says whose repository it is
+// and who reported it, and speaks out of the box.
+func TestReportedIssueIsAnnounced(t *testing.T) {
+	n, remote, _, out := harness(t, Defaults())
+	remote.snap = withReported("https://example/4")
+	n.check() // prime
+	remote.snap = withReported("https://example/5")
+	n.check()
+
+	if len(*out) != 1 {
+		t.Fatalf("sent %d notifications, want 1", len(*out))
+	}
+	got := (*out)[0]
+	if !strings.Contains(got.title, "your repository") || !strings.Contains(got.title, "issue") {
+		t.Errorf("title = %q, want it to say an issue arrived on your repository", got.title)
+	}
+	if !strings.Contains(got.body, "by stranger") || !strings.Contains(got.body, "#5") {
+		t.Errorf("body = %q, want the number and the reporter", got.body)
+	}
+}
+
+// TestReportedHasItsOwnSwitch pins the domain apart from the pull request
+// one, and that an issue merely assigned to you is never announced here:
+// GitHub already sent that through the inbox.
+func TestReportedHasItsOwnSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		prefs Prefs
+		snap  func(string) *poll.Snapshot
+		want  int
+	}{
+		{"reported off silences an issue", Prefs{Incoming: true, Reported: false}, withReported, 0},
+		{"reported off, a pull request still speaks", Prefs{Incoming: true, Reported: false}, withIncoming, 1},
+		{"incoming off, an issue still speaks", Prefs{Incoming: false, Reported: true}, withReported, 1},
+		{"an assigned issue is not a report", Prefs{Reported: true}, withAssigned, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			n, remote, _, out := harness(t, tc.prefs)

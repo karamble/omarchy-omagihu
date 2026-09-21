@@ -34,6 +34,10 @@ const (
 	// contribution in review-requested, so it is not a request and a
 	// notification calling it one would be wrong.
 	DomainIncoming Domain = "incoming"
+	// DomainReported: somebody opened an issue on a repository you own. The
+	// issue counterpart of incoming: assigning needs triage permission, so a
+	// reporter cannot reach you through assignee:@me either.
+	DomainReported Domain = "reported"
 	// DomainBroken: your own pull request failed or was sent back.
 	DomainBroken Domain = "broken"
 	// DomainInbox: any unread notification.
@@ -49,6 +53,7 @@ const (
 type Prefs struct {
 	Reviews   bool `json:"reviews"`
 	Incoming  bool `json:"incoming"`
+	Reported  bool `json:"reported"`
 	Broken    bool `json:"broken"`
 	Inbox     bool `json:"inbox"`
 	Local     bool `json:"local"`
@@ -57,7 +62,7 @@ type Prefs struct {
 
 // Defaults returns the out-of-the-box preferences.
 func Defaults() Prefs {
-	return Prefs{Reviews: true, Incoming: true, Broken: true, Inbox: false, Local: false, Reconcile: false}
+	return Prefs{Reviews: true, Incoming: true, Reported: true, Broken: true, Inbox: false, Local: false, Reconcile: false}
 }
 
 // Enabled reports whether one domain may speak.
@@ -67,6 +72,8 @@ func (p Prefs) Enabled(d Domain) bool {
 		return p.Reviews
 	case DomainIncoming:
 		return p.Incoming
+	case DomainReported:
+		return p.Reported
 	case DomainBroken:
 		return p.Broken
 	case DomainInbox:
@@ -86,6 +93,8 @@ func (p Prefs) Set(d Domain, on bool) Prefs {
 		p.Reviews = on
 	case DomainIncoming:
 		p.Incoming = on
+	case DomainReported:
+		p.Reported = on
 	case DomainBroken:
 		p.Broken = on
 	case DomainInbox:
@@ -101,7 +110,7 @@ func (p Prefs) Set(d Domain, on bool) Prefs {
 // ParseDomain maps a name to a Domain.
 func ParseDomain(name string) (Domain, bool) {
 	switch Domain(name) {
-	case DomainReviews, DomainIncoming, DomainBroken, DomainInbox, DomainLocal, DomainReconcile:
+	case DomainReviews, DomainIncoming, DomainReported, DomainBroken, DomainInbox, DomainLocal, DomainReconcile:
 		return Domain(name), true
 	}
 	return "", false
@@ -192,6 +201,21 @@ func (n *Notifier) check() {
 				events = append(events, event{"critical",
 					summary,
 					fmt.Sprintf("%s #%d\n%s", pr.Repo, pr.Number, pr.Title)})
+			}
+		}
+
+		// Only the issues nobody could assign to you are news here. An issue
+		// somebody triaged to you already reached you as a notification.
+		for _, issue := range acct.AssignedIssues {
+			if !issue.Incoming {
+				continue
+			}
+			key := "reported:" + issue.URL
+			fresh[key] = struct{}{}
+			if n.isNew(key) && prefs.Enabled(DomainReported) {
+				events = append(events, event{"normal",
+					"New issue on your repository",
+					fmt.Sprintf("%s #%d by %s\n%s", issue.Repo, issue.Number, issue.Author, issue.Title)})
 			}
 		}
 

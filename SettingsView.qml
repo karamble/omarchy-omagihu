@@ -43,6 +43,8 @@ Column {
       hint: "Somebody named you as a reviewer and is blocked waiting." },
     { key: "incoming", label: "Somebody opens a pull request on your repository",
       hint: "Nobody asks: an outside contributor cannot name a reviewer, so these arrive unannounced." },
+    { key: "reported", label: "Somebody opens an issue on your repository",
+      hint: "A reporter cannot assign it to you without triage permission, so these arrive unannounced too." },
     { key: "broken", label: "Your pull request fails or is sent back",
       hint: "Checks went red, or a reviewer asked for changes." },
     { key: "inbox", label: "Any unread notification",

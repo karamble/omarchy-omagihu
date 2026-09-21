@@ -53,7 +53,7 @@ usage: omagihu <command> [flags]
   mcp on|off   serve or withdraw the MCP endpoint
   fetch on|off [min]  background fetch of remote refs, and its cadence
   recycle      mint a new bearer token, locking out every current client
-  notify <domain> on|off   reviews, broken, inbox or local
+  notify <domain> on|off   reviews, incoming, reported, broken, inbox, local or reconcile
   clip token|entry         copy the bearer token, or the whole ~/.claude.json
                            entry, to the clipboard
   open <url>   open a url in the browser
