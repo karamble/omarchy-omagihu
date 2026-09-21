@@ -125,8 +125,11 @@ twenty seconds, and a restart never replays what you already knew.
 
 ## Rate discipline
 
-The whole remote plane costs about five account-scoped requests per cycle,
-**regardless of how many repositories you have**. Notifications use conditional
+The polling plane costs about five account-scoped requests per cycle,
+**regardless of how many repositories you have**. The one repository-scoped
+request is the statistics card in a row's disclosure: fetched when you open
+the row, one small query for one repository, and kept for an hour so opening
+it again costs nothing. Notifications use conditional
 requests: when nothing changed GitHub answers 304, which costs nothing at all
 against the rate limit, and its `X-Poll-Interval` is honoured whenever it asks
 for a slower cadence. Pull requests, reviews and assignments arrive together in

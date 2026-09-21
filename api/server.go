@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/karamble/omarchy-omagihu/accounts"
@@ -73,6 +74,13 @@ type Server struct {
 	logger   *slog.Logger
 	version  string
 	started  time.Time
+
+	// Repository statistics, fetched when a row is disclosed and kept for
+	// statsFresh. statsClient and clock are replaceable for tests.
+	statsMu     sync.Mutex
+	stats       map[string]statsEntry
+	statsClient func(accounts.Account) statsFetcher
+	clock       func() time.Time
 }
 
 // NewServer builds the API over the account store and the poller.
@@ -84,7 +92,11 @@ func NewServer(store *accounts.Store, poller Snapshotter, watcher LocalSnapshott
 		logger:  logger,
 		version: version,
 		started: time.Now(),
+		stats:   make(map[string]statsEntry),
+		clock:   time.Now,
 	}
+	clients := &statsClients{version: version}
+	s.statsClient = clients.get
 	if p, ok := poller.(Pausable); ok {
 		s.pausable = append(s.pausable, p)
 	}
@@ -153,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/work", s.handleWork)
 	mux.HandleFunc("GET /api/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /api/repos", s.handleRepos)
+	mux.HandleFunc("GET /api/repo-stats", s.handleRepoStats)
 	mux.HandleFunc("GET /api/facts", s.handleFacts)
 	mux.HandleFunc("GET /api/alerts", s.handleAlerts)
 	mux.HandleFunc("GET /api/catalogue", s.handleCatalogue)

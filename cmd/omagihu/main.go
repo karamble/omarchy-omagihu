@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -38,6 +39,7 @@ usage: omagihu <command> [flags]
 
   dashboard    everything the panel renders, as one JSON document
   repos        the local repositories only
+  stats <origin|owner/name>  one repository's statistics, cached an hour
   inbox        unread notifications only
   health       daemon status
   sleep        stop all polling: nothing leaves this machine
@@ -231,6 +233,16 @@ func run(args []string) error {
 		}
 		_, err = os.Stdout.Write(body)
 		return err
+	case "stats":
+		if len(positional) == 0 {
+			return errors.New("stats needs a git remote url or owner/name")
+		}
+		body, err := fetch(config, addr, "/api/repo-stats?"+statsQuery(positional[0]))
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(body)
+		return err
 	case "dashboard", "repos", "inbox", "health", "alerts", "catalogue", "agents", "facts":
 		// The demo document never reaches the daemon: it exists so the panel can
 		// be drawn without an account, a network or a single real repository.
@@ -319,6 +331,16 @@ func fetch(config, addr, path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s returned %s", path, resp.Status)
 	}
 	return body, nil
+}
+
+// statsQuery names a repository to the daemon: a remote url as it is, or
+// owner/name for one on github.com.
+func statsQuery(target string) string {
+	key := "repo"
+	if strings.ContainsAny(target, ":@") || strings.Contains(target, "://") {
+		key = "origin"
+	}
+	return neturl.Values{key: {target}}.Encode()
 }
 
 // setMonitoring flips the daemon's master switch.
