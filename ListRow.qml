@@ -73,7 +73,7 @@ Rectangle {
   color: {
     if (row.hot) return Qt.rgba(row.tone.r, row.tone.g, row.tone.b, 0.14)
     if (row.urgent) return Qt.rgba(row.tone.r, row.tone.g, row.tone.b, 0.07)
-    return Qt.rgba(1, 1, 1, 0.03)
+    return Util.alpha(Color.foreground, 0.03)
   }
   border.width: row.urgent || row.hot ? 1 : 0
   border.color: Qt.rgba(row.tone.r, row.tone.g, row.tone.b, row.hot ? 0.8 : 0.35)
@@ -134,7 +134,7 @@ Rectangle {
         visible: row.subtitle !== ""
         textFormat: Text.PlainText
         text: row.subtitle
-        color: Qt.darker(Color.foreground, 1.5)
+        color: Util.alpha(Color.foreground, 0.55)
         font.family: row.fontFamily
         font.pixelSize: Style.font.caption
         elide: Text.ElideRight
@@ -152,7 +152,7 @@ Rectangle {
         text: pill.modelData.text !== undefined ? pill.modelData.text : ""
         // The fold pill is quiet until the row is hot or open; a click on it
         // falls through to the row, which is what discloses.
-        tone: pill.fold ? (row.hot || row.disclosed ? Color.accent : Qt.darker(Color.foreground, 1.3))
+        tone: pill.fold ? (row.hot || row.disclosed ? Color.accent : Util.alpha(Color.foreground, 0.7))
                         : (pill.modelData.tone !== undefined ? pill.modelData.tone : Color.accent)
         loud: pill.fold ? row.disclosed : pill.modelData.loud === true
         compact: pill.modelData.compact === true
@@ -173,7 +173,7 @@ Rectangle {
         visible: row.hot || row.disclosed
         textFormat: Text.PlainText
         text: row.disclosed ? row.discloseOpenIcon : row.discloseIcon
-        color: row.disclosed ? row.tone : Qt.darker(Color.foreground, 1.6)
+        color: row.disclosed ? row.tone : Util.alpha(Color.foreground, 0.5)
         font.family: row.fontFamily
         font.pixelSize: Style.font.caption
       }
@@ -191,7 +191,7 @@ Rectangle {
         text: row.actionIcon
         // Quiet until aimed at, then it says what it is.
         color: (actionMouse.containsMouse || row.actionActive || row.actionHasCursor)
-               ? row.actionTone : Qt.darker(Color.foreground, 1.8)
+               ? row.actionTone : Util.alpha(Color.foreground, 0.45)
         font.family: row.fontFamily
         font.pixelSize: Style.font.body
 

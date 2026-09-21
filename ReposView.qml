@@ -61,8 +61,13 @@ Column {
     return m
   }
 
-  // Dirt never raises the indicator, so it never wears the urgent colour.
-  readonly property color quietTone: Qt.darker(view.foreground, 1.3)
+  // Three weights of the one foreground, as alpha so they stay lighter than
+  // the text on a light theme as well as a dark one: body for values, quiet
+  // for labels and meta, quietTone for dirt, which never raises the
+  // indicator and so never wears the urgent colour.
+  readonly property color body: Util.alpha(view.foreground, 0.85)
+  readonly property color quiet: Util.alpha(view.foreground, 0.6)
+  readonly property color quietTone: Util.alpha(view.foreground, 0.7)
 
   // The number on the badge. Whether it counts as dirt is the daemon's call,
   // which arrives as r.dirty.
@@ -171,7 +176,7 @@ Column {
 
   function rowBadges(e) {
     if (e.kind === "header") return view.groupBadges(e.group)
-    if (e.repo.prunable) return [{ text: "STALE", tone: Qt.darker(view.foreground, 1.4) }]
+    if (e.repo.prunable) return [{ text: "STALE", tone: view.quiet }]
     return view.repoBadges(e.repo)
   }
 
@@ -237,11 +242,11 @@ Column {
 
   function statsNumbers(st) {
     return [
-      { value: st.stars || 0, label: "stars" },
-      { value: st.forks || 0, label: "forks" },
-      { value: st.watchers || 0, label: "watchers" },
-      { value: st.openIssues || 0, label: "open issues" },
-      { value: st.openPrs || 0, label: "open PRs" }
+      { value: st.stars || 0, label: "stars", icon: view.owner.iconStar },
+      { value: st.forks || 0, label: "forks", icon: view.owner.iconBranch },
+      { value: st.watchers || 0, label: "watchers", icon: view.owner.iconEye },
+      { value: st.openIssues || 0, label: "open issues", icon: view.owner.iconIssue },
+      { value: st.openPrs || 0, label: "open PRs", icon: view.owner.iconPr }
     ]
   }
 
@@ -262,7 +267,7 @@ Column {
   // so the hero lays them out in two columns.
   function statsRows(answer) {
     var out = []
-    var body = Qt.darker(view.foreground, 1.15)
+    var body = view.body
     var st = answer.stats
     if (st.release) out.push({ label: "release", value: st.release + (st.releasedAt ? " · " + view.ago(st.releasedAt) : ""), tone: body })
     if (st.pushedAt) out.push({ label: "pushed", value: view.ago(st.pushedAt), tone: body })
@@ -295,12 +300,12 @@ Column {
   // rows; the attention section carries facts, each a summary over a detail.
   function detailSections(e) {
     var out = []
-    var body = Qt.darker(view.foreground, 1.15)
-    var quiet = Qt.darker(view.foreground, 1.4)
+    var body = view.body
+    var quiet = view.quiet
     var r = e.repo
     var g = e.group
 
-    if (view.hasStats(e)) out.push({ key: "stats", title: "STATISTICS", origin: view.originOf(e) })
+    if (view.hasStats(e)) out.push({ key: "stats", title: "STATISTICS", icon: view.owner.iconGithub, origin: view.originOf(e) })
 
     if (e.kind === "header") {
       var about = [{ label: "git dir", value: g.key, tone: body }]
@@ -311,7 +316,7 @@ Column {
       }
       var origin = g.remotes || {}
       for (var rk in origin) about.push({ label: rk, value: origin[rk], tone: body })
-      out.push({ key: "repository", title: "REPOSITORY", rows: about })
+      out.push({ key: "repository", title: "REPOSITORY", icon: view.owner.iconGit, rows: about })
       return out
     }
 
@@ -326,7 +331,7 @@ Column {
     }
     if (r.error) { attention.push({ summary: "could not inspect: " + r.error, detail: "", tone: Color.urgent }); worst = Color.urgent }
     if (r.prunable) attention.push({ summary: "stale registration: " + r.prunable, detail: "git worktree prune clears it", tone: body })
-    if (attention.length > 0) out.push({ key: "attention", title: "ATTENTION", facts: attention, tone: worst })
+    if (attention.length > 0) out.push({ key: "attention", title: "ATTENTION", icon: view.owner.iconWarn, facts: attention, tone: worst })
 
     var repository = []
     var where = r.path
@@ -350,7 +355,7 @@ Column {
       for (var b = 0; b < drift.length; b++) if (drift[b].kind === "fork-behind") saidBehind = true
       if ((r.upstreamBehind || 0) > 0 && !saidBehind) repository.push({ label: "fork", value: r.upstreamBehind + " commits behind upstream/HEAD", tone: body })
     }
-    out.push({ key: "repository", title: "REPOSITORY", rows: repository })
+    out.push({ key: "repository", title: "REPOSITORY", icon: view.owner.iconGit, rows: repository })
     if (r.prunable) return out
 
     var state = []
@@ -362,7 +367,7 @@ Column {
       state.push({ label: "last commit", value: r.last.subject + who + when, tone: body })
     }
     state.push({ label: "inspected", value: r.observedAt ? view.ago(r.observedAt) : "not yet", tone: quiet })
-    out.push({ key: "state", title: "STATE", rows: state })
+    out.push({ key: "state", title: "STATE", icon: view.owner.iconTree, rows: state })
     return out
   }
 
@@ -407,12 +412,12 @@ Column {
     var d = view.dirtyCount(r)
     if (d > 0) out.push({ text: d + " CHANGED", tone: view.quietTone })
     if ((r.behind || 0) > 0) out.push({ text: r.behind + " BEHIND", tone: view.quietTone })
-    if ((r.stashes || 0) > 0) out.push({ text: r.stashes + " STASH", tone: Qt.darker(view.foreground, 1.4) })
-    if (view.isLocalOnly(r)) out.push({ text: "LOCAL ONLY", tone: Qt.darker(view.foreground, 1.4) })
+    if ((r.stashes || 0) > 0) out.push({ text: r.stashes + " STASH", tone: view.quiet })
+    if (view.isLocalOnly(r)) out.push({ text: "LOCAL ONLY", tone: view.quiet })
     if (out.length === 0) out.push({ text: "CLEAN", tone: view.owner.toneOk })
     // Somebody else's repository. Quiet, and after the state: what is wrong
     // with it matters more than whose it is.
-    if (r.followed === true) out.push({ text: "FOLLOWED", tone: Qt.darker(view.foreground, 1.4) })
+    if (r.followed === true) out.push({ text: "FOLLOWED", tone: view.quiet })
     return out
   }
 
@@ -424,9 +429,9 @@ Column {
     if (g.unpushed > 0)
       out.push({ text: g.unpushed + " UNPUSHED", tone: Color.accent, loud: g.unpushed > 20 })
     if (g.changed > 0) out.push({ text: g.changed + " CHANGED", tone: view.quietTone })
-    if (g.stale > 0) out.push({ text: g.stale + " STALE", tone: Qt.darker(view.foreground, 1.4) })
+    if (g.stale > 0) out.push({ text: g.stale + " STALE", tone: view.quiet })
     if (out.length === 0) out.push({ text: "CLEAN", tone: view.owner.toneOk })
-    if (g.followed) out.push({ text: "FOLLOWED", tone: Qt.darker(view.foreground, 1.4) })
+    if (g.followed) out.push({ text: "FOLLOWED", tone: view.quiet })
     return out
   }
 
@@ -464,11 +469,13 @@ Column {
   // down the whole detail and not only inside one card.
   readonly property int labelColumn: Style.space(84)
 
-  // One headline figure: a large value over a quiet label.
+  // One headline figure: a large value over a quiet label, with the
+  // label's glyph beside the word so the mark is learned and never a puzzle.
   component HeroStat: Column {
     id: stat
     property string value: ""
     property string label: ""
+    property string icon: ""
     spacing: 0
 
     Text {
@@ -480,12 +487,27 @@ Column {
       font.bold: true
     }
 
-    Text {
-      textFormat: Text.PlainText
-      text: stat.label
-      color: Qt.darker(view.foreground, 1.4)
-      font.family: view.fontFamily
-      font.pixelSize: Style.font.caption
+    Row {
+      spacing: Style.space(4)
+
+      Text {
+        visible: stat.icon !== ""
+        anchors.baseline: statLabel.baseline
+        textFormat: Text.PlainText
+        text: stat.icon
+        color: view.quiet
+        font.family: view.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      Text {
+        id: statLabel
+        textFormat: Text.PlainText
+        text: stat.label
+        color: view.quiet
+        font.family: view.fontFamily
+        font.pixelSize: Style.font.caption
+      }
     }
   }
 
@@ -550,7 +572,7 @@ Column {
       textFormat: Text.PlainText
       elide: Text.ElideRight
       text: line.row.label !== undefined ? line.row.label : ""
-      color: Qt.darker(view.foreground, 1.4)
+      color: view.quiet
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -680,7 +702,7 @@ Column {
         readonly property bool header: entry.kind === "header"
         readonly property bool child: entry.kind === "child"
         readonly property bool stale: child && !!repo.prunable
-        readonly property color quiet: Qt.darker(view.foreground, 1.4)
+        readonly property color quiet: view.quiet
 
         // Checkouts sit in from the header that owns them.
         x: child ? Style.space(18) : 0
@@ -694,12 +716,12 @@ Column {
         title: header ? group.name : repo.name + "  [" + (repo.branch || "?") + "]"
         subtitle: {
           if (header) return group.risky + " of " + group.checkouts + " checkouts need attention"
-          if (stale) return "stale registration, " + repo.prunable + " • git worktree prune clears it"
+          if (stale) return "stale registration, " + repo.prunable + " · git worktree prune clears it"
           var bits = []
           if (repo.upstream) bits.push(repo.upstream)
           else bits.push("no upstream")
           if (repo.last && repo.last.subject) bits.push(repo.last.subject)
-          return bits.join(" • ")
+          return bits.join(" · ")
         }
         badges: view.rowBadges(entry)
         maxBadges: view.badgeCap
@@ -748,8 +770,8 @@ Column {
                 readonly property bool statsCard: section.sectionKey === "stats"
                 readonly property var answer: section.statsCard ? view.owner.statsFor(section.modelData.origin) : null
                 readonly property var figures: section.answer && section.answer.stats ? section.answer.stats : null
-                readonly property color body: Qt.darker(view.foreground, 1.15)
-                readonly property color quiet: Qt.darker(view.foreground, 1.4)
+                readonly property color body: view.body
+                readonly property color quiet: view.quiet
                 // The attention section is the one filled surface, in the
                 // tone of its worst fact; every other section sits on the
                 // row.
@@ -788,11 +810,15 @@ Column {
                       width: parent.width
                       implicitHeight: title.implicitHeight
 
+                      // The title carries the section's glyph before its
+                      // word. The colour is set here because the shell's
+                      // header darkens its foreground, which on a light
+                      // theme makes the title heavier than the values.
                       PanelSectionHeader {
                         id: title
-                        text: section.modelData.title
+                        text: (section.modelData.icon ? section.modelData.icon + "  " : "") + section.modelData.title
                         foreground: section.filled ? section.sectionTone : view.foreground
-                        color: section.filled ? section.sectionTone : Qt.darker(view.foreground, 1.4)
+                        color: section.filled ? section.sectionTone : view.quiet
                         fontFamily: view.fontFamily
                       }
 
@@ -891,6 +917,7 @@ Column {
                           required property var modelData
                           value: view.figure(modelData.value)
                           label: modelData.label
+                          icon: modelData.icon
                         }
                       }
                     }
@@ -1029,7 +1056,7 @@ Column {
           text: view.filter === "all"
                 ? "Check the roots the daemon is watching."
                 : "Everything here is pushed and clean."
-          color: Qt.darker(view.foreground, 1.5)
+          color: Util.alpha(view.foreground, 0.55)
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -1041,7 +1068,7 @@ Column {
     textFormat: Text.PlainText
     width: parent.width
     text: view.shown.length + " of " + view.groups.length + " watched repositories"
-    color: Qt.darker(view.foreground, 1.4)
+    color: view.quiet
     font.family: view.fontFamily
     font.pixelSize: Style.font.caption
   }

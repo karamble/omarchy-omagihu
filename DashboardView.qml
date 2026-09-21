@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import qs.Commons
@@ -25,6 +27,10 @@ Column {
 
   readonly property color foreground: owner.foreground
   readonly property string fontFamily: owner.fontFamily
+  // Dims as alpha over the foreground, so they stay lighter than the text on
+  // a light theme as well as a dark one.
+  readonly property color quiet: Util.alpha(view.foreground, 0.6)
+  readonly property color dim: Util.alpha(view.foreground, 0.7)
 
   readonly property var work: snap && snap.work ? snap.work : null
   readonly property var reviews: work && work.reviewRequests ? work.reviewRequests : []
@@ -114,7 +120,7 @@ Column {
     else if (pr.reviewDecision === "APPROVED")
       out.push({ text: "APPROVED", tone: view.owner.toneOk })
 
-    if (pr.isDraft) out.push({ text: "DRAFT", tone: Qt.darker(view.foreground, 1.4) })
+    if (pr.isDraft) out.push({ text: "DRAFT", tone: view.quiet })
     return out
   }
 
@@ -135,13 +141,19 @@ Column {
   }
 
   // GitHub gives each label its own hex, and some repositories choose colours
-  // that vanish against a dark panel, so anything too dark is lifted until it
-  // can be read. The hue is kept: it is what makes a label recognisable.
+  // that vanish against the panel: too dark on a dark theme, too pale on a
+  // light one. Whichever way the theme reads, the label is pushed the other
+  // way until it can be seen. The hue is kept: it is what makes a label
+  // recognisable.
+  function luma(c) {
+    return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+  }
+  readonly property bool lightPanel: view.luma(Color.background) >= 0.5
   function labelTone(hex) {
     var c = Qt.color("#" + String(hex || "888888"))
-    var luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
-    if (luma >= 0.45) return c
-    return Qt.lighter(c, 1.0 + (0.45 - luma) * 2.2)
+    var l = view.luma(c)
+    if (view.lightPanel) return l <= 0.55 ? c : Qt.darker(c, 1.0 + (l - 0.55) * 2.2)
+    return l >= 0.45 ? c : Qt.lighter(c, 1.0 + (0.45 - l) * 2.2)
   }
 
   // Four bubbles is what fits beside a title on this card. Anything past that
@@ -156,7 +168,7 @@ Column {
       out.push({ text: labels[i].name, tone: view.labelTone(labels[i].color), compact: true })
     if (labels.length > shown)
       out.push({ text: "+" + (labels.length - shown),
-                 tone: Qt.darker(view.foreground, 1.3), compact: true })
+                 tone: view.dim, compact: true })
     return out
   }
 
@@ -246,6 +258,8 @@ Column {
     Repeater {
       model: view.filters
       delegate: Button {
+        required property var modelData
+        required property int index
         readonly property bool hidden: view.isHidden(modelData.key)
         // The chip's own hue: red while its section holds urgent work.
         readonly property color hue: modelData.urgent ? Color.urgent : Color.accent
@@ -289,6 +303,31 @@ Column {
     }
   }
 
+  // A section title: a rule, then the section's glyph before its word, in
+  // the tone of what it holds. The colour is set here because the shell's
+  // header darkens its foreground, which on a light theme makes the title
+  // heavier than the rows under it.
+  component SectionHead: Column {
+    id: head
+    property string icon: ""
+    property string text: ""
+    property color tone: view.quiet
+    width: parent ? parent.width : 0
+    spacing: Style.space(4)
+
+    PanelSeparator {
+      width: parent.width
+      foreground: view.foreground
+    }
+
+    PanelSectionHeader {
+      text: (head.icon !== "" ? head.icon + "  " : "") + head.text
+      foreground: head.tone
+      color: head.tone
+      fontFamily: view.fontFamily
+    }
+  }
+
   // ---------- the list. The whole card scrolls, so no inner viewport here:
   // nested Flickables fight each other for the wheel. ----------
   Column {
@@ -297,24 +336,26 @@ Column {
     spacing: Style.space(6)
 
     // ----- reviews requested of you -----
-    PanelSectionHeader {
+    SectionHead {
       visible: view.showReviews
+      icon: view.owner.iconReview
       text: "WAITING ON YOU"
-      foreground: Color.urgent
-      fontFamily: view.fontFamily
+      tone: Color.urgent
     }
 
     Repeater {
       model: view.showReviews ? view.reviews : []
       delegate: ListRow {
+        required property var modelData
+        required property int index
         hasCursor: view.owner.cursor === view.reviewOffset + index
         width: listColumn.width
-        icon: view.owner.iconBranch
+        icon: view.owner.iconPr
         tone: Color.urgent
         urgent: true
         fontFamily: view.fontFamily
         title: view.shortRepo(modelData.repo) + " #" + modelData.number + "  " + modelData.title
-        subtitle: "by " + modelData.author + " • " + view.ago(modelData.updatedAt)
+        subtitle: "by " + modelData.author + " · " + view.ago(modelData.updatedAt)
         // Both wait on the same person, but only one of them was asked for.
         badges: [{ text: modelData.incoming ? "ON YOURS" : "REVIEW", tone: Color.urgent, loud: true }]
         onActivated: view.owner.openUrl(modelData.url)
@@ -322,24 +363,26 @@ Column {
     }
 
     // ----- issues reported on your repositories -----
-    PanelSectionHeader {
+    SectionHead {
       visible: view.showIncoming
+      icon: view.owner.iconIssue
       text: "REPORTED ON YOUR REPOSITORIES"
-      foreground: Color.urgent
-      fontFamily: view.fontFamily
+      tone: Color.urgent
     }
 
     Repeater {
       model: view.showIncoming ? view.incoming : []
       delegate: ListRow {
+        required property var modelData
+        required property int index
         hasCursor: view.owner.cursor === view.incomingOffset + index
         width: listColumn.width
-        icon: view.owner.iconDot
+        icon: view.owner.iconIssue
         tone: Color.urgent
         urgent: true
         fontFamily: view.fontFamily
         title: view.shortRepo(modelData.repo) + " #" + modelData.number + "  " + modelData.title
-        subtitle: "by " + modelData.author + " • " + view.ago(modelData.updatedAt)
+        subtitle: "by " + modelData.author + " · " + view.ago(modelData.updatedAt)
         badges: [{ text: "ON YOURS", tone: Color.urgent, loud: true }].concat(view.labelBadges(modelData))
         // Labels are compact and already capped by labelBadges.
         maxBadges: 1 + view.maxLabels + 1
@@ -348,40 +391,44 @@ Column {
     }
 
     // ----- your pull requests that need you -----
-    PanelSectionHeader {
+    SectionHead {
       visible: view.showBroken
+      icon: view.owner.iconPr
       text: "YOUR PULL REQUESTS NEED ATTENTION"
-      foreground: Color.urgent
-      fontFamily: view.fontFamily
+      tone: Color.urgent
     }
 
     Repeater {
       model: view.showBroken ? view.brokenPrs : []
       delegate: ListRow {
+        required property var modelData
+        required property int index
         hasCursor: view.owner.cursor === view.brokenOffset + index
         width: listColumn.width
-        icon: view.owner.iconCross
+        icon: view.owner.iconPr
         tone: Color.urgent
         urgent: true
         fontFamily: view.fontFamily
         title: view.shortRepo(modelData.repo) + " #" + modelData.number + "  " + modelData.title
-        subtitle: modelData.repo + " • " + modelData.headRef + " • " + view.ago(modelData.updatedAt)
+        subtitle: modelData.repo + " · " + modelData.headRef + " · " + view.ago(modelData.updatedAt)
         badges: view.prBadges(modelData)
         onActivated: view.owner.openUrl(modelData.url)
       }
     }
 
     // ----- where the two planes disagree -----
-    PanelSectionHeader {
+    SectionHead {
       visible: view.showFacts
+      icon: view.owner.iconExchange
       text: "NEEDS RECONCILING"
-      foreground: view.urgentFacts > 0 ? Color.urgent : view.foreground
-      fontFamily: view.fontFamily
+      tone: view.urgentFacts > 0 ? Color.urgent : view.quiet
     }
 
     Repeater {
       model: view.showFacts ? view.facts : []
       delegate: ListRow {
+        required property var modelData
+        required property int index
         hasCursor: view.owner.cursor === view.factOffset + index
         width: listColumn.width
         icon: view.factIcon(modelData)
@@ -394,7 +441,7 @@ Column {
           if (modelData.repo) bits.push(modelData.repo)
           if (modelData.branch) bits.push(modelData.branch)
           if (modelData.detail) bits.push(modelData.detail)
-          return bits.join(" • ")
+          return bits.join(" · ")
         }
         badges: view.factBadge(modelData)
         onActivated: if (modelData.url) view.owner.openUrl(modelData.url)
@@ -402,46 +449,48 @@ Column {
     }
 
     // ----- inbox -----
-    PanelSectionHeader {
+    SectionHead {
       visible: view.showInbox
+      icon: view.owner.iconInbox
       text: "INBOX"
-      foreground: view.foreground
-      fontFamily: view.fontFamily
     }
 
     Repeater {
       model: view.showInbox ? view.inbox : []
       delegate: ListRow {
+        required property var modelData
+        required property int index
         hasCursor: view.owner.cursor === view.inboxOffset + index
         width: listColumn.width
-        icon: modelData.type === "PullRequest" ? view.owner.iconBranch : view.owner.iconDot
+        icon: modelData.type === "PullRequest" ? view.owner.iconPr : view.owner.iconIssue
         tone: Color.accent
         fontFamily: view.fontFamily
         title: modelData.title
-        subtitle: modelData.repo + " • " + view.ago(modelData.updatedAt)
+        subtitle: modelData.repo + " · " + view.ago(modelData.updatedAt)
         badges: view.inboxBadge(modelData)
         onActivated: view.owner.openUrl(modelData.webUrl)
       }
     }
 
     // ----- issues you opened -----
-    PanelSectionHeader {
+    SectionHead {
       visible: view.showOpened
+      icon: view.owner.iconIssue
       text: "ISSUES YOU OPENED"
-      foreground: view.foreground
-      fontFamily: view.fontFamily
     }
 
     Repeater {
       model: view.showOpened ? view.opened : []
       delegate: ListRow {
+        required property var modelData
+        required property int index
         hasCursor: view.owner.cursor === view.openedOffset + index
         width: listColumn.width
-        icon: view.owner.iconDot
+        icon: view.owner.iconIssue
         tone: Color.accent
         fontFamily: view.fontFamily
         title: "#" + modelData.number + "  " + modelData.title
-        subtitle: modelData.repo + " • " + view.ago(modelData.updatedAt)
+        subtitle: modelData.repo + " · " + view.ago(modelData.updatedAt)
         badges: view.labelBadges(modelData)
         maxBadges: view.maxLabels + 1
         onActivated: view.owner.openUrl(modelData.url)
@@ -477,7 +526,7 @@ Column {
           text: view.anyHidden
                 ? view.hiddenCount + (view.hiddenCount === 1 ? " section is" : " sections are") + " folded away; Show all brings them back."
                 : "Every check green, every review answered."
-          color: Qt.darker(view.foreground, 1.5)
+          color: Util.alpha(view.foreground, 0.55)
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -495,8 +544,8 @@ Column {
     Text {
       Layout.fillWidth: true
       textFormat: Text.PlainText
-      text: view.authored.length + " open PRs • " + view.assignedCount + " issues assigned"
-      color: Qt.darker(view.foreground, 1.3)
+      text: view.authored.length + " open PRs · " + view.assignedCount + " issues assigned"
+      color: view.dim
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption
       elide: Text.ElideRight
@@ -519,7 +568,7 @@ Column {
 
     Button {
       text: "Repositories"
-      iconText: view.owner.iconWarn
+      iconText: view.owner.iconGit
       hasCursor: view.owner.cursor === view.moreRow
       bordered: true
       foreground: view.foreground

@@ -177,10 +177,26 @@ Panel {
   readonly property string iconCaretRight: ""
   readonly property string iconCaretDown: ""
   readonly property string iconOpen: ""
+  // What a thing is, for the figures and the section titles: a star, an eye,
+  // a pull request and an issue in the octicon shapes GitHub itself draws,
+  // the GitHub mark, the git mark, a task list for the working tree, the
+  // exchange arrows for reconciling, an inbox, a review's speech bubbles.
+  readonly property string iconStar: ""
+  readonly property string iconEye: ""
+  readonly property string iconPr: ""
+  readonly property string iconIssue: ""
+  readonly property string iconGithub: ""
+  readonly property string iconGit: ""
+  readonly property string iconTree: ""
+  readonly property string iconExchange: ""
+  readonly property string iconInbox: ""
+  readonly property string iconReview: ""
 
-  // Green is not in the theme palette, and "passing" needs to read as distinct
-  // from the accent colour used for merely informational rows.
-  readonly property color toneOk: "#22c55e"
+  // The theme has no green, and a colour that ignores the theme sits wrong the
+  // moment it changes. A passing check, a clean tree and a fired watch are
+  // the plain state, so they wear the plain foreground; what is wrong wears
+  // urgent, what wants a hand wears accent, and that is the whole scale.
+  readonly property color toneOk: root.foreground
 
   // One label per fact kind, read by every view, so the same drift never
   // wears two names. "FORK BEHIND" rather than "BEHIND": the repositories

@@ -14,6 +14,9 @@ Column {
 
   readonly property color foreground: owner.foreground
   readonly property string fontFamily: owner.fontFamily
+  // A dim as alpha over the foreground, so it stays lighter than the text on
+  // a light theme as well as a dark one.
+  readonly property color dim: Util.alpha(view.foreground, 0.7)
 
   readonly property var alerts: owner.alerts
   // The filters are declared once and drawn from, because the chip strip is
@@ -65,7 +68,7 @@ Column {
     if (status === "no-sample") return Qt.lighter(Color.urgent, 1.3)
     if (status === "fired") return view.owner.toneOk
     if (status === "armed") return Color.accent
-    return Qt.darker(view.foreground, 1.3)
+    return view.dim
   }
 
   function statusLabel(status) {
@@ -127,8 +130,8 @@ Column {
     var out = [{ text: view.statusLabel(a.status),
                  tone: view.statusTone(String(a.status)),
                  loud: a.status === "delivery-failed" || a.status === "armed" }]
-    if (a.standing) out.push({ text: "STANDING", tone: Qt.darker(view.foreground, 1.3) })
-    else out.push({ text: "ONCE", tone: Qt.darker(view.foreground, 1.3) })
+    if (a.standing) out.push({ text: "STANDING", tone: view.dim })
+    else out.push({ text: "ONCE", tone: view.dim })
     var fired = a.state && a.state.fireCount ? a.state.fireCount : 0
     if (fired > 0) out.push({ text: fired + "x", tone: view.owner.toneOk })
     return out
@@ -311,7 +314,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: view.ownershipNote !== ""
     text: view.ownershipNote
-    color: Qt.darker(view.foreground, 1.3)
+    color: view.dim
     font.family: view.fontFamily
     font.pixelSize: Style.font.caption
   }
@@ -385,7 +388,7 @@ Column {
           Layout.alignment: Qt.AlignHCenter
           textFormat: Text.PlainText
           text: "Arm a watch and omagihu will ring when it comes true."
-          color: Qt.darker(view.foreground, 1.5)
+          color: Util.alpha(view.foreground, 0.55)
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption
         }
