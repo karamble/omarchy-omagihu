@@ -66,7 +66,7 @@ func Demo() any {
 	facts := []correlate.Fact{
 		{
 			Kind: correlate.KindCIRedOnHead, Severity: "urgent",
-			Repo: "octosmith/harbourmaster", Path: "~/src/harbourmaster",
+			Repo: "octosmith/harbourmaster", Path: "~/src/harbourmaster-request-id",
 			Branch: "feat/request-id", Number: 407,
 			Summary: "checks failed on the commit you have checked out",
 			URL:     "https://github.com/octosmith/harbourmaster/pull/407",
@@ -139,24 +139,45 @@ func Demo() any {
 		},
 	}
 
+	// harbourmaster is one repository with three registered worktrees: the
+	// main checkout, a feature branch holding unpushed work, and a stale
+	// registration whose directory is gone. The rest are plain repositories,
+	// each the main checkout of its own group.
 	repos := []local.Repo{
 		{
-			Name: "harbourmaster", Path: "~/src/harbourmaster", Branch: "feat/request-id",
-			Upstream: "origin/feat/request-id", Unpushed: 2, Modified: 3, Untracked: 1,
+			Name: "harbourmaster", Path: "~/src/harbourmaster", Branch: "main",
+			Upstream: "origin/main", Modified: 3, Untracked: 1,
+			Group: "~/src/harbourmaster/.git", Main: true,
 			ObservedAt: ago(20 * time.Second),
+		},
+		{
+			Name: "harbourmaster-request-id", Path: "~/src/harbourmaster-request-id", Branch: "feat/request-id",
+			Upstream: "origin/feat/request-id", Unpushed: 2,
+			Group:      "~/src/harbourmaster/.git",
+			ObservedAt: ago(20 * time.Second),
+		},
+		{
+			Name: "harbourmaster-hotfix", Path: "~/src/harbourmaster-hotfix", Branch: "hotfix/tls",
+			Group:    "~/src/harbourmaster/.git",
+			Prunable: "gitdir file points to non-existent location",
 		},
 		{
 			Name: "tidewatch", Path: "~/src/tidewatch", Branch: "fix/backoff-429",
 			Upstream: "origin/fix/backoff-429", Unpushed: 3,
+			Group: "~/src/tidewatch/.git", Main: true,
 			Operation: local.OpRebase, ObservedAt: ago(20 * time.Second),
 		},
 		{
 			Name: "lanternfish", Path: "~/src/lanternfish", Branch: "spike/storage-iface",
-			Upstream: "origin/spike/storage-iface", ObservedAt: ago(20 * time.Second),
+			Upstream: "origin/spike/storage-iface",
+			Group:    "~/src/lanternfish/.git", Main: true,
+			ObservedAt: ago(20 * time.Second),
 		},
 		{
 			Name: "pilotlight", Path: "~/go/src/pilotlight", Branch: "main",
-			Upstream: "origin/main", UpstreamBehind: 4, ObservedAt: ago(20 * time.Second),
+			Upstream: "origin/main", UpstreamBehind: 4,
+			Group: "~/go/src/pilotlight/.git", Main: true,
+			ObservedAt: ago(20 * time.Second),
 		},
 	}
 
@@ -176,7 +197,7 @@ func Demo() any {
 			Monitoring: true, IntervalMin: 5,
 			MCPEnabled: true, FetchEnabled: true, FetchMin: 30,
 			Notify: notify.Prefs{Reviews: true, Broken: true, Local: true, Reconcile: true},
-			Repos:  len(repos), ReposRisk: 2, ScannedAt: ago(20 * time.Second),
+			Repos:  len(repos), ReposRisk: local.RepositoriesAtRisk(repos), ScannedAt: ago(20 * time.Second),
 		},
 		Attention: att,
 		Inbox:     inbox,
