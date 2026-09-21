@@ -8,10 +8,15 @@ import (
 	"testing"
 )
 
-// git runs a git command in dir and fails the test if it errors. No identity
-// flags are passed: the machine's own git config supplies the author.
+// git runs a git command in dir and fails the test if it errors. The author
+// comes from the environment, so the suite does not depend on whatever git
+// identity the machine has configured.
 func git(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	t.Setenv("GIT_AUTHOR_NAME", "omagihu test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "test@omagihu.invalid")
+	t.Setenv("GIT_COMMITTER_NAME", "omagihu test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "test@omagihu.invalid")
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()

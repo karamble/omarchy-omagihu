@@ -33,7 +33,7 @@ PLUGIN_FILES := manifest.json Panel.qml Service.qml DashboardView.qml ReposView.
 		AlertsView.qml ArmForm.qml SettingsView.qml ListRow.qml Badge.qml \
 		README.md LICENSE preview.png
 
-.PHONY: all build test verify toolchain clean install install-check lint
+.PHONY: all build test verify toolchain clean install install-check lint qmltools validate validate-full
 
 all: build
 
@@ -48,8 +48,13 @@ build: toolchain verify
 	@echo "  ./bin/omagihu-setup init     seed an account from the gh CLI"
 	@echo "  ./bin/omagihud               start the daemon"
 
+# CGO_ENABLED is pinned off above so the shipped binary is reproducible, but the
+# race detector is built on cgo and refuses to run without it. Turning it back
+# on for this one target keeps both: a reproducible build and a suite that can
+# actually be raced. Without the override this target only ever printed
+# "-race requires cgo".
 test:
-	$(GO) test -race ./...
+	CGO_ENABLED=1 $(GO) test -race ./...
 
 # Omarchy refuses symlinks inside a plugin folder, so installing copies the
 # QML, the manifest and the built binaries into place.
@@ -63,7 +68,7 @@ install: build
 	@echo "enable it with: omarchy plugin enable karamble.omagihu left"
 
 clean:
-	rm -rf bin
+	rm -rf bin .lintroot
 
 # Check every module against the committed checksums before anything compiles.
 verify: toolchain
@@ -114,7 +119,14 @@ SHELL_DIR := $(or $(OMARCHY_PATH),/usr/share/omarchy)/shell
 LINTROOT  := $(CURDIR)/.lintroot
 QMLFILES  := $(shell find . -name '*.qml' -not -path './.git/*' -not -path './.lintroot/*')
 
-lint:
+# Name the missing tool. Without this the loop below runs a binary that is not
+# there and reports every file as unparseable, which points at the QML.
+qmltools:
+	@for t in $(QMLFORMAT) $(QMLLINT); do \
+	  command -v "$$t" >/dev/null 2>&1 || { echo "$$t not found: install qt6-declarative"; exit 1; }; \
+	done
+
+lint: qmltools
 	@for f in $(QMLFILES); do $(QMLFORMAT) "$$f" >/dev/null || { echo "failed to parse $$f"; exit 1; }; done
 	@echo "qml: all files parse"
 	@# `import qs.Ui` resolves as <import path>/qs/Ui/qmldir, so the shell has
@@ -122,3 +134,17 @@ lint:
 	@mkdir -p $(LINTROOT) && ln -sfn $(SHELL_DIR) $(LINTROOT)/qs
 	$(QMLLINT) -I $(LINTROOT) $(QMLFILES)
 	@rm -rf $(LINTROOT)
+
+# The gate every change passes before it lands: vet, gofmt, the race suite and
+# a QML parse. verify brings the toolchain preflight with it, so a missing Go
+# arrives as the friendly message rather than "go: No such file".
+validate: verify qmltools
+	$(GO) vet ./...
+	@unformatted=$$(gofmt -l .); \
+	  test -z "$$unformatted" || { echo "gofmt needed on:"; echo "$$unformatted"; exit 1; }
+	CGO_ENABLED=1 $(GO) test -race ./...
+	@for f in $(QMLFILES); do $(QMLFORMAT) "$$f" >/dev/null || { echo "failed to parse $$f"; exit 1; }; done
+	@echo "qml: all files parse"
+
+# Adds the type check, which needs Qt 6 and the Omarchy shell tree.
+validate-full: validate lint
