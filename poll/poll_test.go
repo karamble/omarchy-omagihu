@@ -656,35 +656,66 @@ func TestPostForceConditionalRestored(t *testing.T) {
 	<-done
 }
 
+// stackDump returns every goroutine's stack. The buffer grows until the dump
+// fits, because runtime.Stack truncates silently at the buffer size and a
+// truncated dump undercounts, which would let a leak read as clean.
+func stackDump() string {
+	for size := 1 << 16; ; size *= 2 {
+		buf := make([]byte, size)
+		if n := runtime.Stack(buf, true); n < size {
+			return string(buf[:n])
+		}
+	}
+}
+
+// waitForcedGoroutines counts the bridge goroutines waitForced spawns, by the
+// name of its closure. Counting these rather than runtime.NumGoroutine keeps
+// the number this test's own: the process-wide count also holds whatever
+// earlier tests are still winding down, which is a number this test cannot
+// predict and has no business asserting on.
+//
+// Blocks, not occurrences: goroutines are separated by a blank line, so one
+// goroutine can never be counted twice.
+func waitForcedGoroutines() int {
+	n := 0
+	for _, g := range strings.Split(stackDump(), "\n\n") {
+		if strings.Contains(g, "waitForced.func") {
+			n++
+		}
+	}
+	return n
+}
+
 // TestWaitForcedNoGoroutineLeak proves that waitForced does not accumulate
 // goroutines over many calls: the transient per-call bridge goroutine must
 // terminate on its own (timer/ctx/stop). A broken implementation that leaked
-// would keep NumGoroutine climbing with the iteration count.
+// would leave one behind per call.
 func TestWaitForcedNoGoroutineLeak(t *testing.T) {
 	p := New([]Client{newFake("a")}, quietLogger(), time.Hour, time.Hour)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	runtime.GC()
-	before := runtime.NumGoroutine()
-
-	// 2000 sequential short waits: each spawns one bridge goroutine. If any
-	// leaked, the count would grow roughly one per call.
-	for i := 0; i < 2000; i++ {
+	// Enough that a per-call leak is unmistakable. A leak on one call in ten
+	// still leaves 30 behind, and the assertion below tolerates none.
+	const waits = 300
+	for i := 0; i < waits; i++ {
 		if _, ok := p.waitForced(ctx, time.Millisecond, 0); !ok {
 			t.Fatal("waitForced cancelled unexpectedly")
 		}
 	}
-	// Give any straggler goroutines a moment to be scheduled out.
-	runtime.GC()
-	time.Sleep(20 * time.Millisecond)
-	runtime.GC()
-	after := runtime.NumGoroutine()
 
-	const tolerance = 8 // small slack for runtime/runtime internals
-	if after > before+tolerance {
-		t.Fatalf("goroutines grew from %d to %d over %d waits; waitForced likely leaks",
-			before, after, 2000)
+	// The bridge goroutine exits after waitForced has returned, so the last
+	// few are still on their way out. Wait for them rather than sleeping a
+	// fixed guess: a loaded machine takes longer to schedule them out, and
+	// that is not a leak. Only a count that never reaches zero is.
+	deadline := time.Now().Add(5 * time.Second)
+	left := waitForcedGoroutines()
+	for left > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		left = waitForcedGoroutines()
+	}
+	if left > 0 {
+		t.Fatalf("%d waitForced goroutines still parked after %d waits; waitForced leaks", left, waits)
 	}
 }
 
